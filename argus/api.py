@@ -1,0 +1,476 @@
+"""REST-API, WebSocket-Push, go2rtc-Proxy und Auslieferung der Web-Oberfläche."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import secrets
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from starlette.background import BackgroundTask
+
+from . import __version__
+
+log = logging.getLogger("argus.api")
+WEB = Path(__file__).resolve().parent / "web"
+GO2RTC = "127.0.0.1:1984"
+HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
+       "transfer-encoding", "upgrade", "host", "content-length", "content-encoding", "authorization", "cookie"}
+
+
+class Hub:
+    """Thread-sicherer Push an alle verbundenen Browser."""
+
+    def __init__(self) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.clients: set[asyncio.Queue] = set()
+
+    def publish(self, msg: dict) -> None:
+        if self.loop and self.clients:
+            self.loop.call_soon_threadsafe(self._fanout, msg)
+
+    def _fanout(self, msg: dict) -> None:
+        for q in list(self.clients):
+            if q.qsize() < 200:
+                q.put_nowait(msg)
+
+
+class FaceAssign(BaseModel):
+    person_id: int | None = None
+    name: str | None = None
+
+
+class DetectToggle(BaseModel):
+    enabled: bool
+
+
+class PersonIn(BaseModel):
+    name: str
+
+
+def create_app(ctx) -> FastAPI:
+    app = FastAPI(title="Argus NVR", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
+    cfg, paths, db = ctx.cfg, ctx.paths, ctx.db
+    secret = secrets.token_bytes(32)
+    http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
+    gpu_cache: dict[str, Any] = {"ts": 0, "data": None}
+
+    # ------------------------------------------------------------------ Auth
+    def _token(user: str) -> str:
+        return hmac.new(secret, user.encode(), hashlib.sha256).hexdigest()
+
+    def _authorized(headers, cookies) -> bool:
+        a = cfg.auth
+        if not a.username:
+            return True
+        if hmac.compare_digest(cookies.get("argus_session", ""), _token(a.username)):
+            return True
+        h = headers.get("authorization", "")
+        if h.lower().startswith("basic "):
+            try:
+                u, _, p = base64.b64decode(h[6:]).decode().partition(":")
+                return hmac.compare_digest(u, a.username) and hmac.compare_digest(p, a.password)
+            except Exception:
+                return False
+        return False
+
+    @app.middleware("http")
+    async def auth_mw(request: Request, call_next):
+        if request.url.path == "/api/health" or _authorized(request.headers, request.cookies):
+            resp = await call_next(request)
+            if cfg.auth.username and "argus_session" not in request.cookies:
+                resp.set_cookie("argus_session", _token(cfg.auth.username), httponly=True, samesite="lax",
+                                max_age=30 * 86400)
+            return resp
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Argus"'})
+
+    @app.on_event("startup")
+    async def _startup() -> None:
+        ctx.hub.loop = asyncio.get_running_loop()
+
+    # ------------------------------------------------------------------ Basis
+    @app.get("/api/health")
+    def health():
+        return {"ok": True, "version": __version__}
+
+    def _cam_info(cid: str) -> dict:
+        cam = cfg.cameras[cid]
+        w = ctx.workers.get(cid)
+        return {"id": cid, "name": cam.name, "has_sub": bool(cam.sub), "faces": cam.faces and bool(ctx.faces),
+                "record": cam.record and cfg.record.mode != "off",
+                "zones": {n: z.points for n, z in cam.zones.items()},
+                "live_stream": f"{cid}_sub" if cam.sub else cid, "main_stream": cid,
+                "stats": w.stats() if w else None, "counts": ctx.events.counts.get(cid, {})}
+
+    @app.get("/api/config")
+    def config():
+        return {"version": __version__, "cameras": [_cam_info(c) for c in cfg.cameras],
+                "record": cfg.record.model_dump(), "faces": cfg.faces.model_dump(), "faces_active": bool(ctx.faces),
+                "objects": cfg.objects.track, "mqtt": {"enabled": cfg.mqtt.enabled, "prefix": cfg.mqtt.topic_prefix}}
+
+    @app.get("/api/cameras")
+    def cameras():
+        return [_cam_info(c) for c in cfg.cameras]
+
+    @app.get("/api/cameras/{cid}/latest.jpg")
+    def latest(cid: str, boxes: int = 1, w: int = 960):
+        wk = ctx.workers.get(cid)
+        if not wk:
+            raise HTTPException(404)
+        data = wk.latest_jpeg(annotate=bool(boxes), max_w=max(160, min(w, 1920)))
+        if data is None:
+            raise HTTPException(503, "Noch kein Bild")
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/cameras/{cid}/detect")
+    def toggle_detect(cid: str, body: DetectToggle):
+        if cid not in ctx.workers:
+            raise HTTPException(404)
+        ctx.set_detect(cid, body.enabled)
+        return {"enabled": body.enabled}
+
+    @app.get("/api/cameras/{cid}/export.mp4")
+    def export(cid: str, start: float, end: float):
+        rec = ctx.recorders.get(cid)
+        if not rec or end <= start or end - start > 3 * 3600:
+            raise HTTPException(400, "Ungültiger Zeitraum (max. 3 h)")
+        out = rec.export(start, end)
+        if not out:
+            raise HTTPException(404, "Keine Daueraufnahme in diesem Zeitraum")
+        return FileResponse(out, media_type="video/mp4", filename=f"{cid}_{int(start)}.mp4",
+                            background=BackgroundTask(out.unlink, missing_ok=True))
+
+    # ------------------------------------------------------------------ Ereignisse
+    def _clip_for(ev: dict) -> dict | None:
+        return db.one("SELECT id, start_ts, end_ts, bytes FROM clips WHERE camera=? AND start_ts<=? AND end_ts>=? "
+                      "ORDER BY start_ts DESC LIMIT 1", (ev["camera"], ev["start_ts"] + 2, ev["start_ts"]))
+
+    def _event_out(ev: dict) -> dict:
+        ev = db.event_out(ev)
+        clip = _clip_for(ev) if ev.get("end_ts") else None
+        ev["clip"] = ({"id": clip["id"], "url": f"/api/clips/{clip['id']}.mp4",
+                       "offset": max(0.0, ev["start_ts"] - clip["start_ts"] - 2)} if clip else None)
+        for k in ("snapshot", "thumb", "face_thumb"):
+            ev[k + "_url"] = f"/media/{ev[k]}" if ev.get(k) else None
+        ev["active"] = ev.get("end_ts") is None
+        return ev
+
+    @app.get("/api/events")
+    def events(camera: str | None = None, grp: str | None = None, label: str | None = None,
+               person: str | None = None, before: float | None = None, after: float | None = None,
+               limit: int = 60):
+        sql, args = "SELECT * FROM events WHERE 1=1", []
+        for col, val in (("camera", camera), ("grp", grp), ("label", label)):
+            if val:
+                vals = val.split(",")
+                sql += f" AND {col} IN ({','.join('?' * len(vals))})"
+                args += vals
+        if person == "__known__":
+            sql += " AND sub_label IS NOT NULL"
+        elif person == "__unknown__":
+            sql += " AND grp='person' AND sub_label IS NULL AND face_thumb IS NOT NULL"
+        elif person:
+            sql += " AND sub_label=?"
+            args.append(person)
+        if before:
+            sql += " AND start_ts<?"
+            args.append(before)
+        if after:
+            sql += " AND start_ts>?"
+            args.append(after)
+        sql += " ORDER BY start_ts DESC LIMIT ?"
+        args.append(max(1, min(limit, 500)))
+        return [_event_out(e) for e in db.query(sql, args)]
+
+    @app.get("/api/events/summary")
+    def events_summary(days: int = 7):
+        since = time.time() - days * 86400
+        rows = db.query("SELECT camera, grp, COUNT(*) AS n FROM events WHERE start_ts>? GROUP BY camera, grp", (since,))
+        hours = db.query("SELECT CAST(strftime('%H', start_ts, 'unixepoch', 'localtime') AS INTEGER) AS h, "
+                         "COUNT(*) AS n FROM events WHERE start_ts>? GROUP BY h", (since,))
+        people = db.query("SELECT sub_label AS name, COUNT(*) AS n, MAX(start_ts) AS last FROM events "
+                          "WHERE start_ts>? AND sub_label IS NOT NULL GROUP BY sub_label ORDER BY n DESC", (since,))
+        return {"by_camera": rows, "by_hour": hours, "people": people}
+
+    @app.get("/api/events/{eid}")
+    def event(eid: str):
+        ev = db.one("SELECT * FROM events WHERE id=?", (eid,))
+        if not ev:
+            raise HTTPException(404)
+        return _event_out(ev)
+
+    @app.delete("/api/events/{eid}")
+    def delete_event(eid: str):
+        ev = db.one("SELECT * FROM events WHERE id=?", (eid,))
+        if not ev:
+            raise HTTPException(404)
+        for k in ("snapshot", "thumb"):
+            if ev.get(k):
+                (paths.media / ev[k]).unlink(missing_ok=True)
+        db.execute("DELETE FROM events WHERE id=?", (eid,))
+        for s in db.query("SELECT id, path FROM face_samples WHERE event_id=? AND source IN ('event','unknown')", (eid,)):
+            (paths.faces / s["path"]).unlink(missing_ok=True)
+            db.execute("DELETE FROM face_samples WHERE id=?", (s["id"],))
+        # Clip löschen, wenn kein anderes Ereignis ihn mehr nutzt
+        if ev.get("end_ts"):
+            clip = _clip_for(ev)
+            if clip:
+                others = db.one("SELECT COUNT(*) AS n FROM events WHERE camera=? AND start_ts BETWEEN ? AND ?",
+                                (ev["camera"], clip["start_ts"] - 1, clip["end_ts"]))
+                if others and others["n"] == 0:
+                    c = db.one("SELECT path FROM clips WHERE id=?", (clip["id"],))
+                    if c:
+                        (paths.media / c["path"]).unlink(missing_ok=True)
+                    db.execute("DELETE FROM clips WHERE id=?", (clip["id"],))
+        return {"ok": True}
+
+    @app.post("/api/events/{eid}/face")
+    def correct_face(eid: str, body: FaceAssign):
+        if not ctx.faces:
+            raise HTTPException(400, "Gesichtserkennung ist deaktiviert")
+        pid = ctx.faces.person_id_for(body.person_id, body.name)
+        return ctx.faces.correct_event(eid, pid)
+
+    @app.get("/api/clips/{cid}.mp4")
+    def clip(cid: str):
+        c = db.one("SELECT path FROM clips WHERE id=?", (cid,))
+        if not c:
+            raise HTTPException(404)
+        p = paths.media / c["path"]
+        if not p.exists():
+            raise HTTPException(404)
+        return FileResponse(p, media_type="video/mp4")
+
+    @app.get("/media/{rel:path}")
+    def media(rel: str):
+        p = (paths.media / rel).resolve()
+        if paths.media.resolve() not in p.parents or not p.is_file() or p.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+            raise HTTPException(404)
+        return FileResponse(p, headers={"Cache-Control": "public, max-age=86400"})
+
+    # ------------------------------------------------------------------ Gesichter
+    def _faces():
+        if not ctx.faces:
+            raise HTTPException(400, "Gesichtserkennung ist deaktiviert")
+        return ctx.faces
+
+    @app.get("/api/faces/persons")
+    def persons():
+        rows = db.query("""
+            SELECT p.id, p.name, p.created,
+              (SELECT COUNT(*) FROM face_samples s WHERE s.person_id=p.id AND s.source IN ('manual','auto','confirmed')) AS samples,
+              (SELECT COUNT(*) FROM face_samples s WHERE s.person_id=p.id AND s.source='auto') AS learned,
+              (SELECT path FROM face_samples s WHERE s.person_id=p.id ORDER BY quality DESC LIMIT 1) AS cover,
+              (SELECT MAX(start_ts) FROM events e WHERE e.person_id=p.id) AS last_seen,
+              (SELECT COUNT(*) FROM events e WHERE e.person_id=p.id) AS events
+            FROM persons p ORDER BY p.name COLLATE NOCASE""")
+        for r in rows:
+            r["cover_url"] = f"/media/faces/{r['cover']}" if r["cover"] else None
+        return rows
+
+    @app.post("/api/faces/persons")
+    def create_person(body: PersonIn):
+        pid = _faces().person_id_for(None, body.name)
+        return {"id": pid}
+
+    @app.patch("/api/faces/persons/{pid}")
+    def rename_person(pid: int, body: PersonIn):
+        _faces().rename_person(pid, body.name)
+        return {"ok": True}
+
+    @app.delete("/api/faces/persons/{pid}")
+    def delete_person(pid: int):
+        _faces().delete_person(pid)
+        return {"ok": True}
+
+    @app.get("/api/faces/persons/{pid}/samples")
+    def person_samples(pid: int):
+        rows = db.query("SELECT id, quality, path, source, event_id, camera, created FROM face_samples "
+                        "WHERE person_id=? AND source IN ('manual','auto','confirmed') ORDER BY created DESC", (pid,))
+        for r in rows:
+            r["url"] = f"/media/faces/{r['path']}"
+        return rows
+
+    @app.post("/api/faces/persons/{pid}/upload")
+    async def upload(pid: int, files: list[UploadFile] = File(...)):
+        f = _faces()
+        ok = 0
+        for up in files:
+            data = await up.read()
+            if await asyncio.to_thread(f.enroll_image, data, pid):
+                ok += 1
+        return {"added": ok, "total": len(files)}
+
+    @app.post("/api/faces/samples/{sid}/assign")
+    def assign_sample(sid: int, body: FaceAssign):
+        f = _faces()
+        f.assign_sample(sid, f.person_id_for(body.person_id, body.name))
+        return {"ok": True}
+
+    @app.delete("/api/faces/samples/{sid}")
+    def delete_sample(sid: int):
+        _faces().assign_sample(sid, None)
+        return {"ok": True}
+
+    @app.get("/api/faces/clusters")
+    def clusters():
+        rows = db.query("SELECT id, count, first_seen, last_seen FROM face_clusters ORDER BY last_seen DESC LIMIT 200")
+        out = []
+        for c in rows:
+            s = db.query("SELECT id, path, quality, event_id, camera, created FROM face_samples WHERE cluster_id=? "
+                         "ORDER BY quality DESC LIMIT 8", (c["id"],))
+            if not s:
+                continue
+            for x in s:
+                x["url"] = f"/media/faces/{x['path']}"
+            suggestion = None
+            if ctx.faces:
+                import numpy as np
+                cen = db.one("SELECT centroid FROM face_clusters WHERE id=?", (c["id"],))
+                m = ctx.faces.match(np.frombuffer(cen["centroid"], np.float32))
+                if m and m[0][1] >= cfg.faces.recognition_threshold * 0.75:
+                    suggestion = {"person_id": m[0][0], "name": ctx.faces.names.get(m[0][0]), "score": round(m[0][1], 2)}
+            out.append({**c, "samples": s, "suggestion": suggestion})
+        return out
+
+    @app.post("/api/faces/clusters/{cid}/assign")
+    def assign_cluster(cid: int, body: FaceAssign):
+        f = _faces()
+        pid = f.person_id_for(body.person_id, body.name)
+        if pid is None:
+            raise HTTPException(400, "Name oder Person fehlt")
+        n = f.assign_cluster(cid, pid)
+        return {"assigned": n, "person_id": pid}
+
+    @app.delete("/api/faces/clusters/{cid}")
+    def delete_cluster(cid: int):
+        _faces().delete_cluster(cid)
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ System
+    def _gpu() -> list[dict] | None:
+        if time.time() - gpu_cache["ts"] < 5:
+            return gpu_cache["data"]
+        data = None
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=name,utilization.gpu,utilization.decoder,memory.used,"
+                                  "memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=3).stdout.strip()
+            data = []
+            for line in out.splitlines():
+                p = [x.strip() for x in line.split(",")]
+                num = lambda v: float(v) if v.replace(".", "", 1).isdigit() else None  # noqa: E731
+                data.append({"name": p[0], "util": num(p[1]), "decoder": num(p[2]), "mem_used": num(p[3]),
+                             "mem_total": num(p[4]), "temp": num(p[5]), "power": num(p[6]) if len(p) > 6 else None})
+        except Exception:
+            data = None
+        gpu_cache.update(ts=time.time(), data=data)
+        return data
+
+    @app.get("/api/stats")
+    def stats():
+        return ctx.stats(gpu=_gpu())
+
+    @app.post("/api/storage/cleanup")
+    async def storage_cleanup():
+        await asyncio.to_thread(ctx.retention.cleanup)
+        return ctx.retention.usage
+
+    # ------------------------------------------------------------------ WebSocket Push
+    @app.websocket("/api/ws")
+    async def ws(sock: WebSocket):
+        if not _authorized(sock.headers, sock.cookies):
+            await sock.close(code=4401)
+            return
+        await sock.accept()
+        q: asyncio.Queue = asyncio.Queue()
+        ctx.hub.clients.add(q)
+        try:
+            await sock.send_json({"type": "hello", "version": __version__})
+            while True:
+                msg = await q.get()
+                await sock.send_text(json.dumps(msg, default=str))
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            ctx.hub.clients.discard(q)
+
+    # ------------------------------------------------------------------ go2rtc Proxy (ein Port für alles)
+    @app.websocket("/go2rtc/{path:path}")
+    async def go2rtc_ws(sock: WebSocket, path: str):
+        if not _authorized(sock.headers, sock.cookies):
+            await sock.close(code=4401)
+            return
+        import websockets
+        await sock.accept()
+        url = f"ws://{GO2RTC}/go2rtc/{path}" + (f"?{sock.url.query}" if sock.url.query else "")
+        try:
+            async with websockets.connect(url, max_size=None, ping_interval=None) as up:
+                async def c2u():
+                    while True:
+                        m = await sock.receive()
+                        if m["type"] == "websocket.disconnect":
+                            return
+                        if m.get("text") is not None:
+                            await up.send(m["text"])
+                        elif m.get("bytes") is not None:
+                            await up.send(m["bytes"])
+
+                async def u2c():
+                    async for m in up:
+                        if isinstance(m, str):
+                            await sock.send_text(m)
+                        else:
+                            await sock.send_bytes(m)
+
+                tasks = [asyncio.create_task(c2u()), asyncio.create_task(u2c())]
+                _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for t in pending:
+                    t.cancel()
+        except Exception as e:
+            log.debug("go2rtc ws: %s", e)
+        finally:
+            try:
+                await sock.close()
+            except Exception:
+                pass
+
+    @app.api_route("/go2rtc/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+    async def go2rtc_http(path: str, request: Request):
+        url = f"http://{GO2RTC}/go2rtc/{path}"
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
+        try:
+            req = http.build_request(request.method, url, params=request.query_params, headers=headers,
+                                     content=await request.body())
+            r = await http.send(req, stream=True)
+        except httpx.HTTPError:
+            return JSONResponse({"error": "go2rtc nicht erreichbar"}, status_code=502)
+        out_headers = {k: v for k, v in r.headers.items() if k.lower() not in HOP}
+        return StreamingResponse(r.aiter_raw(), status_code=r.status_code, headers=out_headers,
+                                 background=BackgroundTask(r.aclose))
+
+    # ------------------------------------------------------------------ Web-UI
+    app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+    @app.get("/")
+    def index():
+        return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/manifest.webmanifest")
+    def manifest():
+        return JSONResponse({"name": "Argus NVR", "short_name": "Argus", "start_url": "/", "display": "standalone",
+                             "background_color": "#0b1020", "theme_color": "#0b1020",
+                             "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]})
+
+    return app

@@ -1,0 +1,6 @@
+media/
+config/config.yml
+config/trt-cache/
+**/__pycache__
+*.pyc
+.git

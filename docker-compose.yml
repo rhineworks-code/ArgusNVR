@@ -1,0 +1,32 @@
+services:
+  argus:
+    image: ghcr.io/rhineworks-code/argusnvr:latest
+    # Selbst bauen statt Image laden: "docker compose build" (z. B. anderes YOLO-Modell)
+    build:
+      context: .
+      args:
+        YOLO_MODEL: yolo11s        # yolo11n (sparsam) | yolo11s | yolo11m (genauer)
+    container_name: argus
+    restart: unless-stopped
+    shm_size: 256mb
+    environment:
+      - TZ=Europe/Berlin
+    ports:
+      - "5080:5080"                # Web-Oberfläche + API
+      - "8554:8554"                # RTSP-Restream (z. B. für Home Assistant)
+      - "8555:8555/tcp"            # WebRTC (Live-Bild mit minimaler Latenz)
+      - "8555:8555/udp"
+      # - "1984:1984"              # go2rtc direkt (optional, nicht nötig)
+    volumes:
+      - ./config:/config
+      - ./media:/media/argus       # Clips, Snapshots, Gesichter, Datenbank
+    tmpfs:
+      # RAM-Puffer für Vorlauf-Segmente: schont SSD/HDD, nichts wird unnötig geschrieben
+      - /tmp/cache:size=512m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video, compute, utility]

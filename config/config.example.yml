@@ -1,0 +1,99 @@
+# ===========================================================================
+#  Argus NVR – Konfiguration
+#  Kopieren nach config/config.yml und anpassen. Änderungen -> Container neu starten.
+# ===========================================================================
+
+# Optionaler Login für Web-UI/API (leer lassen = kein Login, z. B. wenn NPM davor sitzt)
+auth:
+  username: ""
+  password: ""
+
+mqtt:
+  enabled: true
+  host: 192.168.1.10
+  port: 1883
+  username: ""
+  password: ""
+  topic_prefix: argus
+  discovery_prefix: homeassistant   # Home Assistant MQTT-Discovery
+
+detector:
+  device: auto          # auto | cuda | cpu   (auto = GPU wenn verfügbar)
+  gpu_id: 0
+  min_score: 0.45       # globale Untergrenze, feiner pro Objekt unter objects.filters
+
+objects:
+  # COCO-Klassen, die verfolgt werden. Gruppen: person / vehicle / animal
+  track: [person, car, truck, bus, motorcycle, bicycle, dog, cat, bird, horse]
+  filters:
+    person:  { min_score: 0.55, min_area: 1200 }
+    car:     { min_score: 0.60, min_area: 2500 }
+    dog:     { min_score: 0.55 }
+    cat:     { min_score: 0.55 }
+
+faces:
+  enabled: true
+  recognition_threshold: 0.42    # Cosinus-Ähnlichkeit ArcFace; höher = strenger
+  auto_learn: true               # erkannte Gesichter mit hoher Sicherheit verbessern das Profil
+  auto_learn_threshold: 0.55
+  max_samples_per_person: 40
+  unknown_cluster_threshold: 0.45  # ähnliche Unbekannte werden gruppiert
+  min_face_size: 36              # Pixel (im Erkennungsbild)
+
+record:
+  mode: events          # events (nur Ereignisse, spart am meisten) | continuous | off
+  source: main          # main = volle Qualität, sub = Substream (deutlich kleinere Dateien)
+  audio: false
+  pre_roll: 5           # Sekunden Vorlauf (aus RAM-Puffer)
+  post_roll: 8          # Sekunden Nachlauf
+  max_clip_length: 300
+  retention:
+    events_days: 14
+    continuous_days: 3
+    max_storage_gb: 100  # harte Obergrenze – älteste Aufnahmen werden zuerst gelöscht
+
+snapshots:
+  quality: 75
+  max_width: 1280
+
+# WebRTC: IP des Servers eintragen, damit das Live-Bild per WebRTC (sehr geringe Latenz) läuft
+webrtc:
+  candidates: ["192.168.1.20:8555"]
+
+cameras:
+  einfahrt:
+    name: Einfahrt
+    main: rtsp://user:passwort@192.168.1.50:554/Streaming/Channels/101
+    sub:  rtsp://user:passwort@192.168.1.50:554/Streaming/Channels/102
+    detect:
+      stream: sub       # sub | main – Gesichter brauchen mind. ~720p
+      width: 1280       # leer lassen = Auflösung des Streams
+      height: 720
+      fps: 5
+    hwaccel: cuda       # Dekodierung auf der GPU (NVDEC); "none" = CPU
+    faces: true
+    objects: [person, car, dog, cat]     # optional, sonst objects.track
+    zones:
+      einfahrt:
+        # normierte Koordinaten 0..1 (x, y) – im UI unter "Kamera" ablesbar
+        points: [[0.05, 0.55], [0.95, 0.55], [0.95, 1.0], [0.05, 1.0]]
+        objects: [person, car]
+    masks:
+      # Bereiche, die ignoriert werden (Bäume im Wind, Straße, Zeitstempel …)
+      - [[0.0, 0.0], [1.0, 0.0], [1.0, 0.08], [0.0, 0.08]]
+    motion:
+      threshold: 25     # Pixel-Differenz
+      min_area: 0.002   # Anteil des Bildes
+
+  garten:
+    name: Garten
+    main: rtsp://user:passwort@192.168.1.51:554/stream1
+    sub:  rtsp://user:passwort@192.168.1.51:554/stream2
+    detect: { stream: sub, fps: 5 }
+    faces: false
+    objects: [person, dog, cat, bird]
+
+# Optional: zusätzliche roh übergebene go2rtc-Konfiguration (z. B. eigene Streams)
+# go2rtc:
+#   streams:
+#     tuer_2way: ["rtsp://...", "ffmpeg:tuer#audio=opus"]
