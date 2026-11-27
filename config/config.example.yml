@@ -1,5 +1,5 @@
 # ===========================================================================
-#  Argus NVR – Konfiguration
+#  CamSpire NVR – Konfiguration
 #  Kopieren nach config/config.yml und anpassen. Änderungen -> Container neu starten.
 # ===========================================================================
 
@@ -14,7 +14,7 @@ mqtt:
   port: 1883
   username: ""
   password: ""
-  topic_prefix: argus
+  topic_prefix: camspire
   discovery_prefix: homeassistant   # Home Assistant MQTT-Discovery
 
 detector:

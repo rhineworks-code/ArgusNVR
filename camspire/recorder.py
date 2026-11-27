@@ -20,7 +20,7 @@ from pathlib import Path
 from .config import CameraCfg, Config, Paths
 from .db import Database
 
-log = logging.getLogger("argus.recorder")
+log = logging.getLogger("camspire.recorder")
 
 SEG_TIME = 2
 FMT = "%Y%m%d%H%M%S"

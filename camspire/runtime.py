@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 
-log = logging.getLogger("argus.runtime")
+log = logging.getLogger("camspire.runtime")
 
 _preloaded = False
 

@@ -13,7 +13,7 @@ import numpy as np
 from .config import COCO
 from .runtime import create_session
 
-log = logging.getLogger("argus.detector")
+log = logging.getLogger("camspire.detector")
 
 
 @dataclass

@@ -14,7 +14,7 @@ from .config import GROUP_NAMES, Config, Paths
 from .db import Database
 from .tracker import Track
 
-log = logging.getLogger("argus.events")
+log = logging.getLogger("camspire.events")
 
 
 class ActiveEvent:

@@ -22,7 +22,7 @@ from starlette.background import BackgroundTask
 
 from . import __version__
 
-log = logging.getLogger("argus.api")
+log = logging.getLogger("camspire.api")
 WEB = Path(__file__).resolve().parent / "web"
 GO2RTC = "127.0.0.1:1984"
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
@@ -71,7 +71,7 @@ class MqttTest(BaseModel):
 
 
 def create_app(ctx) -> FastAPI:
-    app = FastAPI(title="Argus NVR", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
+    app = FastAPI(title="CamSpire NVR", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
     paths, db = ctx.paths, ctx.db
     secret = secrets.token_bytes(32)
     http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
@@ -85,7 +85,7 @@ def create_app(ctx) -> FastAPI:
         a = ctx.cfg.auth
         if not a.username:
             return True
-        if hmac.compare_digest(cookies.get("argus_session", ""), _token(a.username)):
+        if hmac.compare_digest(cookies.get("camspire_session", ""), _token(a.username)):
             return True
         h = headers.get("authorization", "")
         if h.lower().startswith("basic "):
@@ -100,11 +100,11 @@ def create_app(ctx) -> FastAPI:
     async def auth_mw(request: Request, call_next):
         if request.url.path == "/api/health" or _authorized(request.headers, request.cookies):
             resp = await call_next(request)
-            if ctx.cfg.auth.username and "argus_session" not in request.cookies:
-                resp.set_cookie("argus_session", _token(ctx.cfg.auth.username), httponly=True, samesite="lax",
+            if ctx.cfg.auth.username and "camspire_session" not in request.cookies:
+                resp.set_cookie("camspire_session", _token(ctx.cfg.auth.username), httponly=True, samesite="lax",
                                 max_age=30 * 86400)
             return resp
-        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Argus"'})
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="CamSpire"'})
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -530,7 +530,7 @@ def create_app(ctx) -> FastAPI:
         import yaml
         data = yaml.safe_dump(dump_config(ctx.cfg), sort_keys=False, allow_unicode=True)
         return Response(data, media_type="application/x-yaml",
-                        headers={"Content-Disposition": 'attachment; filename="argus-config.yml"'})
+                        headers={"Content-Disposition": 'attachment; filename="camspire-config.yml"'})
 
     @app.post("/api/settings/import")
     async def import_settings(file: UploadFile = File(...)):
@@ -548,7 +548,7 @@ def create_app(ctx) -> FastAPI:
         url = body.url.strip()
         if not url:
             raise HTTPException(400, "Keine Adresse angegeben")
-        name = f"__argus_test_{_uuid.uuid4().hex[:6]}"
+        name = f"__camspire_test_{_uuid.uuid4().hex[:6]}"
         via = url
         used = False
         if ctx.go2rtc.available and ctx.go2rtc.proc and ctx.go2rtc.proc.poll() is None:
@@ -720,7 +720,7 @@ def create_app(ctx) -> FastAPI:
 
     @app.get("/manifest.webmanifest")
     def manifest():
-        return JSONResponse({"name": "Argus NVR", "short_name": "Argus", "start_url": "/", "display": "standalone",
+        return JSONResponse({"name": "CamSpire NVR", "short_name": "CamSpire", "start_url": "/", "display": "standalone",
                              "background_color": "#0b1020", "theme_color": "#0b1020",
                              "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]})
 

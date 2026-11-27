@@ -1,4 +1,4 @@
-// Argus NVR – Web-Oberfläche (ohne Build-Schritt, reines ES-Modul)
+// CamSpire NVR – Web-Oberfläche (ohne Build-Schritt, reines ES-Modul)
 import { settingsPage } from './settings.js';
 import { historyPage } from './history.js';
 const $ = (s, el = document) => el.querySelector(s);
@@ -90,11 +90,11 @@ async function loadPlayer() {
   try {
     const mod = await import('/go2rtc/video-rtc.js');
     VideoRTC = mod.VideoRTC;
-    class ArgusVideo extends VideoRTC {
+    class CamSpireVideo extends VideoRTC {
       oninit() { super.oninit(); this.video.muted = true; this.video.playsInline = true; this.video.controls = false; }
       onconnect() { const r = super.onconnect(); return r; }
     }
-    if (!customElements.get('argus-video')) customElements.define('argus-video', ArgusVideo);
+    if (!customElements.get('camspire-video')) customElements.define('camspire-video', CamSpireVideo);
   } catch (e) { console.warn('go2rtc Player nicht verfügbar', e); VideoRTC = false; }
   return VideoRTC;
 }
@@ -149,7 +149,7 @@ export function camTile(cam, { big = false } = {}) {
     const P = await loadPlayer();
     if (!P) { showStill(); return; }
     const stream = pickStream(cam, big, forceH264);
-    player = document.createElement('argus-video');
+    player = document.createElement('camspire-video');
     player.className = 'player';
     player.background = false;
     player.mode = 'webrtc,mse,hls,mjpeg';
@@ -413,7 +413,7 @@ pages.faces = async () => {
     $$('.person', fc).forEach((el) => (el.onclick = () => openPerson(state.persons.find((p) => p.id === +el.dataset.id))));
   } else {
     if (!clusters.length) { fc.innerHTML = `<div class="empty">${ICON.empty}Keine unbekannten Gesichter – alles zugeordnet.</div>`; return; }
-    fc.innerHTML = `<p style="color:var(--muted);margin-top:0">Ähnliche Gesichter werden automatisch gruppiert. Einmal benennen – Argus lernt daraus und erkennt die Person künftig selbst.</p>
+    fc.innerHTML = `<p style="color:var(--muted);margin-top:0">Ähnliche Gesichter werden automatisch gruppiert. Einmal benennen – CamSpire lernt daraus und erkennt die Person künftig selbst.</p>
       <datalist id="plist">${state.persons.map((p) => `<option value="${esc(p.name)}">`).join('')}</datalist>
       <div class="clusters">${clusters.map((c) => `
       <div class="cluster" data-id="${c.id}">
@@ -448,7 +448,7 @@ async function openPerson(p) {
     <div class="m-body">
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <label class="btn primary">${ICON.upload} Fotos hochladen<input type="file" accept="image/*" multiple hidden id="up"></label>
-        <span style="color:var(--muted);font-size:13px">Mehrere Fotos (frontal, seitlich, mit/ohne Brille) verbessern die Erkennung. Gelernte Bilder (Auto) fügt Argus selbst hinzu.</span>
+        <span style="color:var(--muted);font-size:13px">Mehrere Fotos (frontal, seitlich, mit/ohne Brille) verbessern die Erkennung. Gelernte Bilder (Auto) fügt CamSpire selbst hinzu.</span>
       </div>
       <div class="samples" id="smp"></div>
     </div>`);

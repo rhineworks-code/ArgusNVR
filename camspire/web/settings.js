@@ -1,4 +1,4 @@
-// Argus NVR – Einstellungen (Kameras, Erkennung, Gesichter, Aufnahme, Home Assistant, Zugang)
+// CamSpire NVR – Einstellungen (Kameras, Erkennung, Gesichter, Aufnahme, Home Assistant, Zugang)
 let H; // Helfer aus app.js: { api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig }
 
 const LABEL_DE = { person: 'Person', bicycle: 'Fahrrad', car: 'Auto', motorcycle: 'Motorrad', bus: 'Bus', truck: 'LKW',
@@ -150,8 +150,8 @@ async function tabCameras(el) {
   try { stats = (await H.api('/api/stats')).cameras; } catch {}
   if (S.tab !== 'cameras' || !el.isConnected) return;
   el.innerHTML = `
-    ${!cams.length ? `<div class="welcome card"><img src="/static/icon.svg" alt=""><div><h2>Willkommen bei Argus</h2>
-      <p>Füge deine erste Kamera hinzu. Am einfachsten über eine Hersteller-Vorlage – oder lass Argus per ONVIF im Netzwerk suchen.</p></div></div>` : ''}
+    ${!cams.length ? `<div class="welcome card"><img src="/static/icon.svg" alt=""><div><h2>Willkommen bei CamSpire</h2>
+      <p>Füge deine erste Kamera hinzu. Am einfachsten über eine Hersteller-Vorlage – oder lass CamSpire per ONVIF im Netzwerk suchen.</p></div></div>` : ''}
     <div class="row-actions"><button class="btn primary" id="cam-add">${H.ICON.plus} Kamera hinzufügen</button>
       <button class="btn" id="cam-scan">Im Netzwerk suchen (ONVIF)</button></div>
     <div class="cam-list">${cams.map(([id, c]) => {
@@ -224,7 +224,7 @@ export function openCameraEditor(id, preset = null) {
         ${row('Daueraufnahme behalten', `${num('continuous_days', 1, 3650, 1, 'cam')} <span class="muted">Tage – leer = global (${S.cfg.record.retention.continuous_days})</span>`)}
       </section>
       <section><h3>Live-Bild</h3>
-        ${row('H.265 für den Browser umwandeln', seg('live_transcode', [['auto', 'Automatisch'], ['on', 'Immer'], ['off', 'Nie']], 'cam'), 'Viele Browser zeigen H.265 nicht an – Argus wandelt dann auf der GPU in H.264 um (nur solange jemand zuschaut)')}
+        ${row('H.265 für den Browser umwandeln', seg('live_transcode', [['auto', 'Automatisch'], ['on', 'Immer'], ['off', 'Nie']], 'cam'), 'Viele Browser zeigen H.265 nicht an – CamSpire wandelt dann auf der GPU in H.264 um (nur solange jemand zuschaut)')}
       </section>
       <div class="m-foot"><span class="spacer"></span><button class="btn" data-close>Abbrechen</button><button class="btn primary" id="c-save">Speichern</button></div>
     </div>`, true);
@@ -531,7 +531,7 @@ function tabRecord(el) {
           : `✕ ${H.esc(st.error || 'nicht verbunden')} – es wird vorübergehend lokal gespeichert`}</div>
       ${row('Ziel', seg('storage.type', [['local', 'Lokal'], ['smb', 'Netzwerkfestplatte (SMB)'], ['nfs', 'NFS'], ['path', 'Ordner']]))}
       <div id="st-fields"></div>
-      <p class="muted" style="margin-bottom:0">Datenbank, Snapshots und Gesichter bleiben lokal (schnell und ausfallsicher). Ist das NAS kurz weg, speichert Argus lokal weiter und verbindet sich automatisch neu.</p>
+      <p class="muted" style="margin-bottom:0">Datenbank, Snapshots und Gesichter bleiben lokal (schnell und ausfallsicher). Ist das NAS kurz weg, speichert CamSpire lokal weiter und verbindet sich automatisch neu.</p>
     </div>
     <div class="card form"><h3>Snapshots</h3>
       ${row('JPEG-Qualität', range('snapshots.quality', 40, 95, 5, 'v'))}
@@ -542,7 +542,7 @@ function tabRecord(el) {
     if (t === 'local') { box.innerHTML = ''; return; }
     box.innerHTML = (t === 'smb' ? `
       ${row('NAS-Adresse', text('storage.server', '192.168.1.5'))}
-      ${row('Freigabe', text('storage.share', 'z. B. surveillance oder video/argus'), 'Synology: Name des freigegebenen Ordners')}
+      ${row('Freigabe', text('storage.share', 'z. B. surveillance oder video/camspire'), 'Synology: Name des freigegebenen Ordners')}
       ${row('Benutzer', text('storage.username', 'NAS-Benutzer'))}
       ${row('Passwort', text('storage.password', '', 'password'))}
       ${row('SMB-Version', seg('storage.smb_version', [['3.0', '3.0'], ['2.1', '2.1'], ['2.0', '2.0'], ['1.0', '1.0 (alt)']]), 'Synology/QNAP/Windows: 3.0, FRITZ!Box: 3.0 oder 2.0')}`
@@ -550,7 +550,7 @@ function tabRecord(el) {
       ${row('NAS-Adresse', text('storage.server', '192.168.1.5'))}
       ${row('Export-Pfad', text('storage.share', '/volume1/surveillance'), 'auf dem NAS die IP des Servers für NFS freigeben')}`
       : `${row('Ordner im Container', text('storage.path', '/nas'), 'auf dem Host eingebunden und in docker-compose.yml als Volume angegeben (z. B. /mnt/nas:/nas)')}`) + `
-      ${row('Unterordner', text('storage.subfolder', 'argus'))}
+      ${row('Unterordner', text('storage.subfolder', 'camspire'))}
       ${t !== 'path' ? row('Weitere Mount-Optionen', text('storage.options', 'optional, z. B. seal'), 'für Fortgeschrittene') : ''}
       ${row('', '<button class="btn small" id="st-test">Verbindung testen</button> <span id="st-res"></span>')}`;
     bind(box, { cfg: S.cfg }, onChange);
@@ -568,7 +568,7 @@ function tabRecord(el) {
 
 // ---------------------------------------------------------------- Home Assistant / MQTT
 function tabHA(el) {
-  const p = () => S.cfg.mqtt.topic_prefix || 'argus';
+  const p = () => S.cfg.mqtt.topic_prefix || 'camspire';
   el.innerHTML = `
     <div class="card form"><h3>MQTT-Broker</h3>
       ${row('MQTT aktiv', toggle('mqtt.enabled'))}
@@ -579,11 +579,11 @@ function tabHA(el) {
       ${row('', `<button class="btn small" id="m-test">Verbindung testen</button> <span id="m-res"></span>`)}
     </div>
     <div class="card form"><h3>Topics</h3>
-      ${row('Topic-Präfix', text('mqtt.topic_prefix', 'argus'))}
+      ${row('Topic-Präfix', text('mqtt.topic_prefix', 'camspire'))}
       ${row('Discovery-Präfix', text('mqtt.discovery_prefix', 'homeassistant'), 'Standard in Home Assistant: homeassistant')}
     </div>
     <div class="card"><h3>Was in Home Assistant erscheint</h3>
-      <p class="muted" style="margin-top:0">Pro Kamera ein Gerät „Argus &lt;Name&gt;“ – automatisch per MQTT-Discovery:</p>
+      <p class="muted" style="margin-top:0">Pro Kamera ein Gerät „CamSpire &lt;Name&gt;“ – automatisch per MQTT-Discovery:</p>
       <ul class="ha-list"><li><b>Person / Fahrzeug / Tier erkannt</b> – Belegungssensor, auch pro Zone</li>
         <li><b>Anzahl</b> Personen, Fahrzeuge, Tiere</li><li><b>Erkanntes Gesicht</b> – Name + Sicherheit</li>
         <li><b>Letzter Snapshot</b> als Kamera-Entität</li><li><b>Erkennung</b> an/aus als Schalter</li></ul>

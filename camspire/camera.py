@@ -15,7 +15,7 @@ from .detector import Detection, Detector
 from .motion import MotionDetector
 from .tracker import Tracker
 
-log = logging.getLogger("argus.camera")
+log = logging.getLogger("camspire.camera")
 
 COLORS = {"person": (80, 200, 255), "vehicle": (255, 170, 60), "animal": (120, 230, 120), "other": (200, 200, 200)}
 

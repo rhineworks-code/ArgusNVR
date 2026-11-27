@@ -46,7 +46,7 @@ class MqttCfg(BaseModel):
     port: int = 1883
     username: str = ""
     password: str = ""
-    topic_prefix: str = "argus"
+    topic_prefix: str = "camspire"
     discovery_prefix: str = "homeassistant"
 
 
@@ -106,14 +106,14 @@ class StorageCfg(BaseModel):
     """Wohin Aufnahmen geschrieben werden. Datenbank, Snapshots und Gesichter bleiben lokal."""
     type: Literal["local", "smb", "nfs", "path"] = "local"
     server: str = ""            # IP/Name des NAS
-    share: str = ""             # SMB: Freigabe (z. B. "surveillance" oder "video/argus"), NFS: Export-Pfad
+    share: str = ""             # SMB: Freigabe (z. B. "surveillance" oder "video/camspire"), NFS: Export-Pfad
     username: str = ""
     password: str = ""
     domain: str = ""
     smb_version: str = "3.0"
     options: str = ""           # zusätzliche Mount-Optionen
     path: str = ""              # type=path: im Container eingebundener Ordner (z. B. /nas)
-    subfolder: str = "argus"    # Unterordner auf dem Ziel
+    subfolder: str = "camspire"    # Unterordner auf dem Ziel
 
 
 class SnapshotCfg(BaseModel):
@@ -202,29 +202,46 @@ class Config(BaseModel):
         return cam.objects if cam.objects else self.objects.track
 
 
+def _env(name: str, default: str) -> str:
+    # ARGUS_* = alter Name (vor der Umbenennung in CamSpire), weiterhin akzeptiert
+    return os.environ.get(f"CAMSPIRE_{name}") or os.environ.get(f"ARGUS_{name}") or default
+
+
 class Paths:
     def __init__(self) -> None:
-        self.config = Path(os.environ.get("ARGUS_CONFIG", "/config/config.yml"))
-        self.media = Path(os.environ.get("ARGUS_MEDIA", "/media/argus"))
-        self.cache = Path(os.environ.get("ARGUS_CACHE", "/tmp/cache"))
-        self.models = Path(os.environ.get("ARGUS_MODELS", "/models"))
+        self.config = Path(_env("CONFIG", "/config/config.yml"))
+        self.media = Path(_env("MEDIA", "/media/camspire"))
+        self.cache = Path(_env("CACHE", "/tmp/cache"))
+        self.models = Path(_env("MODELS", "/models"))
         self.clips = self.media / "clips"
         self.recordings = self.media / "recordings"
         self.snapshots = self.media / "snapshots"
         self.faces = self.media / "faces"
-        self.db = self.media / "argus.db"
+        self.db = self.media / "camspire.db"
 
     def ensure(self) -> None:
         for p in (self.media, self.cache, self.clips, self.recordings, self.snapshots, self.faces):
             p.mkdir(parents=True, exist_ok=True)
+        # Datenbank aus der Zeit vor der Umbenennung (argus.db) übernehmen
+        old = self.media / "argus.db"
+        if old.exists() and not self.db.exists():
+            for suffix in ("", "-wal", "-shm"):
+                src = Path(str(old) + suffix)
+                if src.exists():
+                    src.rename(Path(str(self.db) + suffix))
 
 
 def load_config(path: Path) -> Config:
-    """Fehlt die Datei, startet Argus leer – die Einrichtung erfolgt dann in der Weboberfläche."""
+    """Fehlt die Datei, startet CamSpire leer – die Einrichtung erfolgt dann in der Weboberfläche."""
     if not path.exists():
         return Config()
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return Config.model_validate(raw)
+    cfg = Config.model_validate(raw)
+    # Umbenennung Argus -> CamSpire: altes MQTT-Präfix übernehmen
+    if cfg.mqtt.topic_prefix == "argus":
+        cfg.mqtt.topic_prefix = "camspire"
+        save_config(path, cfg)
+    return cfg
 
 
 class _Dumper(yaml.SafeDumper):
@@ -240,7 +257,7 @@ def _repr_list(dumper, data):
 _Dumper.add_representer(list, _repr_list)
 
 SECRET = "********"
-HEADER = ("# Argus NVR – Konfiguration\n"
+HEADER = ("# CamSpire NVR – Konfiguration\n"
           "# Wird von der Weboberfläche (Einstellungen) geschrieben. Bearbeiten per Hand ist möglich,\n"
           "# Kommentare gehen beim nächsten Speichern aus der Oberfläche allerdings verloren.\n"
           "# Vorheriger Stand: config.yml.bak\n\n")

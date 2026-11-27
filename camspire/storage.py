@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import Config, Paths
 from .db import Database
 
-log = logging.getLogger("argus.storage")
+log = logging.getLogger("camspire.storage")
 
 
 def dir_size(p: Path) -> int:

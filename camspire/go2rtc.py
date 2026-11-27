@@ -13,7 +13,7 @@ import yaml
 
 from .config import Config
 
-log = logging.getLogger("argus.go2rtc")
+log = logging.getLogger("camspire.go2rtc")
 
 
 def build_config(cfg: Config) -> dict:

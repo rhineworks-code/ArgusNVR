@@ -1,4 +1,4 @@
-// Argus NVR – Verlauf: Wiedergabe mit vertikaler Zeitachse (oben = jetzt, unten = älter)
+// CamSpire NVR – Verlauf: Wiedergabe mit vertikaler Zeitachse (oben = jetzt, unten = älter)
 let H;
 const GCOL = { person: '#ffc850', vehicle: '#3caaff', animal: '#78e678' };
 const LABEL = { person: 'Person', car: 'Auto', truck: 'LKW', bus: 'Bus', motorcycle: 'Motorrad', bicycle: 'Fahrrad',
