@@ -215,3 +215,4 @@ Vollständig unter `/api/docs`.
 | Zu viele Fehlalarme | `objects.filters` (min_score, min_area), Masken für Bäume/Straße, `motion.threshold` erhöhen |
 | Gesichter werden nicht erkannt | Erkennungsauflösung erhöhen, `faces.min_face_size` senken, mehr Referenzbilder |
 | Hinter Nginx Proxy Manager | „Websockets Support“ aktivieren |
+| `port is already allocated` (z. B. Frigate läuft parallel) | `.env` neben `docker-compose.yml` anlegen: `ARGUS_RTSP_PORT=8564` und `ARGUS_WEBRTC_PORT=8565`; in den Einstellungen als WebRTC-Adresse dann `SERVER-IP:8565` eintragen |
