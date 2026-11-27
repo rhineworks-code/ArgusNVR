@@ -77,10 +77,25 @@ class CameraRecorder:
         self.running = False
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except Exception:
+                self.proc.kill()
         with self.lock:
-            if self.session and self.session.segs:
-                self._finalize(self.session)
-            self.session = None
+            sess = self.session
+            if sess:
+                sess.active.clear()
+                sess.close_after = sess.close_after or time.time()
+                try:
+                    self.tick()          # letzte Segmente aus dem RAM übernehmen
+                except Exception:
+                    pass
+                self.session = None
+                if sess.segs:
+                    self._finalize(sess)
+                else:
+                    shutil.rmtree(sess.dir, ignore_errors=True)
+        self._finalize_q.put(None)       # Finalizer-Thread beenden
 
     def _segmenter(self) -> None:
         src = f"rtsp://127.0.0.1:8554/{self.cam.record_stream(self.rc.source)}"
@@ -95,9 +110,12 @@ class CameraRecorder:
             cmd += ["-c:v", "copy", "-f", "segment", "-segment_time", str(SEG_TIME),
                     "-segment_format", "mpegts", "-reset_timestamps", "1", "-strftime", "1",
                     str(self.cache / f"{FMT}.ts")]
+            t0 = time.time()
             try:
                 self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 _, err = self.proc.communicate()
+                if time.time() - t0 > 60:
+                    self.restarts = 0
                 if self.running:
                     msg = (err or b"").decode(errors="ignore").strip().splitlines()[-1:] or [""]
                     log.warning("[%s] Aufnahme-Stream beendet: %s", self.cam.id, msg[0])
@@ -198,6 +216,8 @@ class CameraRecorder:
     def _finalizer(self) -> None:
         while True:
             sess = self._finalize_q.get()
+            if sess is None:
+                return
             try:
                 self._finalize(sess)
             except Exception:
@@ -283,13 +303,15 @@ class CameraRecorder:
 
 
 class RecordingJanitor(threading.Thread):
-    def __init__(self, recorders: list[CameraRecorder]) -> None:
+    def __init__(self, recorders: dict[str, CameraRecorder]) -> None:
         super().__init__(name="rec-janitor", daemon=True)
-        self.recorders = recorders
+        self.recorders = recorders      # dict wird beim Live-Reload verändert
 
     def run(self) -> None:
         while True:
-            for r in self.recorders:
+            for r in list(self.recorders.values()):
+                if not r.running:
+                    continue
                 try:
                     r.tick()
                 except Exception:

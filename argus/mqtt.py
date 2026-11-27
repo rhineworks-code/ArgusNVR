@@ -50,7 +50,7 @@ class Mqtt:
 
     def stop(self) -> None:
         try:
-            self.client.publish(f"{self.p}/available", "offline", retain=True)
+            self.client.publish(f"{self.p}/available", "offline", retain=True).wait_for_publish(2)
             self.client.loop_stop()
             self.client.disconnect()
         except Exception:
@@ -69,8 +69,7 @@ class Mqtt:
         self.connected = True
         log.info("MQTT verbunden mit %s:%s", self.m.host, self.m.port)
         self._pub(f"{self.p}/available", "online", retain=True)
-        for cid in self.cfg.cameras:
-            client.subscribe(f"{self.p}/{cid}/detect/set")
+        client.subscribe(f"{self.p}/+/detect/set")
         client.subscribe(f"{self.m.discovery_prefix}/status")
         self._discovery()
 
@@ -87,42 +86,50 @@ class Mqtt:
 
     # ------------------------------------------------------------------ Discovery
     def _discovery(self) -> None:
+        for cid, cam in self.cfg.cameras.items():
+            for topic, payload in self.discovery_items(cid, cam):
+                self._pub(topic, payload, retain=True)
+            self.detect_state(cid, cam.detect.enabled)
+
+    def remove_camera(self, cid: str, cam) -> None:
+        """Entitäten einer gelöschten/umbenannten Kamera aus Home Assistant entfernen."""
+        for topic, _ in self.discovery_items(cid, cam, all_zones=True):
+            self.client.publish(topic, b"", retain=True)
+
+    def discovery_items(self, cid: str, cam, all_zones: bool = False) -> list[tuple[str, dict]]:
         dp = self.m.discovery_prefix
         avail = [{"topic": f"{self.p}/available"}]
-        for cid, cam in self.cfg.cameras.items():
-            dev = {"identifiers": [f"argus_{cid}"], "name": f"Argus {cam.name}", "manufacturer": "Argus NVR",
-                   "model": "Kamera"}
-            groups = ["person", "vehicle", "animal"]
-            for g in groups:
-                uid = f"argus_{cid}_{g}"
-                self._pub(f"{dp}/binary_sensor/{uid}/config", {
-                    "name": f"{GROUP_DE[g]} erkannt", "unique_id": uid, "device": dev, "availability": avail,
-                    "state_topic": f"{self.p}/{cid}/{g}", "device_class": "occupancy",
-                    "value_template": "{{ 'ON' if value|int(0) > 0 else 'OFF' }}", "icon": ICONS[g]}, retain=True)
-                self._pub(f"{dp}/sensor/{uid}_count/config", {
-                    "name": f"Anzahl {GROUP_DE[g]}", "unique_id": f"{uid}_count", "device": dev, "availability": avail,
-                    "state_topic": f"{self.p}/{cid}/{g}", "state_class": "measurement", "icon": ICONS[g]}, retain=True)
-                self._pub(f"{dp}/camera/{uid}_snapshot/config", {
-                    "name": f"Letzte {GROUP_DE[g]}", "unique_id": f"{uid}_snapshot", "device": dev,
-                    "availability": avail, "topic": f"{self.p}/{cid}/{g}/snapshot"}, retain=True)
-                for z in cam.zones:
-                    zuid = f"argus_{cid}_{z}_{g}"
-                    self._pub(f"{dp}/binary_sensor/{zuid}/config", {
-                        "name": f"{GROUP_DE[g]} in {z}", "unique_id": zuid, "device": dev, "availability": avail,
-                        "state_topic": f"{self.p}/{cid}/zone/{z}/{g}", "device_class": "occupancy",
-                        "value_template": "{{ 'ON' if value|int(0) > 0 else 'OFF' }}", "icon": ICONS[g]},
-                        retain=True)
-            if cam.faces and self.cfg.faces.enabled:
-                self._pub(f"{dp}/sensor/argus_{cid}_face/config", {
-                    "name": "Erkanntes Gesicht", "unique_id": f"argus_{cid}_face", "device": dev,
-                    "availability": avail, "state_topic": f"{self.p}/{cid}/face",
-                    "json_attributes_topic": f"{self.p}/{cid}/face/attributes", "icon": "mdi:face-recognition"},
-                    retain=True)
-            self._pub(f"{dp}/switch/argus_{cid}_detect/config", {
-                "name": "Erkennung", "unique_id": f"argus_{cid}_detect", "device": dev, "availability": avail,
-                "command_topic": f"{self.p}/{cid}/detect/set", "state_topic": f"{self.p}/{cid}/detect/state",
-                "icon": "mdi:motion-sensor"}, retain=True)
-            self.detect_state(cid, cam.detect.enabled)
+        dev = {"identifiers": [f"argus_{cid}"], "name": f"Argus {cam.name}", "manufacturer": "Argus NVR",
+               "model": "Kamera"}
+        items: list[tuple[str, dict]] = []
+        for g in ("person", "vehicle", "animal"):
+            uid = f"argus_{cid}_{g}"
+            items.append((f"{dp}/binary_sensor/{uid}/config", {
+                "name": f"{GROUP_DE[g]} erkannt", "unique_id": uid, "device": dev, "availability": avail,
+                "state_topic": f"{self.p}/{cid}/{g}", "device_class": "occupancy",
+                "value_template": "{{ 'ON' if value|int(0) > 0 else 'OFF' }}", "icon": ICONS[g]}))
+            items.append((f"{dp}/sensor/{uid}_count/config", {
+                "name": f"Anzahl {GROUP_DE[g]}", "unique_id": f"{uid}_count", "device": dev, "availability": avail,
+                "state_topic": f"{self.p}/{cid}/{g}", "state_class": "measurement", "icon": ICONS[g]}))
+            items.append((f"{dp}/camera/{uid}_snapshot/config", {
+                "name": f"Letzte {GROUP_DE[g]}", "unique_id": f"{uid}_snapshot", "device": dev,
+                "availability": avail, "topic": f"{self.p}/{cid}/{g}/snapshot"}))
+            for z in cam.zones:
+                zuid = f"argus_{cid}_{z}_{g}"
+                items.append((f"{dp}/binary_sensor/{zuid}/config", {
+                    "name": f"{GROUP_DE[g]} in {z}", "unique_id": zuid, "device": dev, "availability": avail,
+                    "state_topic": f"{self.p}/{cid}/zone/{z}/{g}", "device_class": "occupancy",
+                    "value_template": "{{ 'ON' if value|int(0) > 0 else 'OFF' }}", "icon": ICONS[g]}))
+        if all_zones or (cam.faces and self.cfg.faces.enabled):
+            items.append((f"{dp}/sensor/argus_{cid}_face/config", {
+                "name": "Erkanntes Gesicht", "unique_id": f"argus_{cid}_face", "device": dev,
+                "availability": avail, "state_topic": f"{self.p}/{cid}/face",
+                "json_attributes_topic": f"{self.p}/{cid}/face/attributes", "icon": "mdi:face-recognition"}))
+        items.append((f"{dp}/switch/argus_{cid}_detect/config", {
+            "name": "Erkennung", "unique_id": f"argus_{cid}_detect", "device": dev, "availability": avail,
+            "command_topic": f"{self.p}/{cid}/detect/set", "state_topic": f"{self.p}/{cid}/detect/state",
+            "icon": "mdi:motion-sensor"}))
+        return items
 
     # ------------------------------------------------------------------ Zustände
     def counts(self, cam: str, counts: dict[str, int], prev: dict[str, int]) -> None:
@@ -168,3 +175,38 @@ class Mqtt:
 
     def stats(self, data: dict) -> None:
         self._pub(f"{self.p}/stats", data)
+
+
+def test_connection(host: str, port: int, username: str = "", password: str = "", timeout: float = 6) -> tuple[bool, str]:
+    """Kurzer Verbindungstest für die Einstellungsseite."""
+    import paho.mqtt.client as mqtt
+    result: dict[str, Any] = {}
+    done = threading.Event()
+    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"argus-test-{int(time.time())}")
+    if username:
+        c.username_pw_set(username, password)
+
+    def on_connect(client, userdata, flags, rc, props=None):
+        result["rc"] = rc
+        done.set()
+    c.on_connect = on_connect
+    try:
+        c.connect(host, int(port), keepalive=10)
+    except Exception as e:
+        return False, f"Server nicht erreichbar: {e}"
+    c.loop_start()
+    done.wait(timeout)
+    c.loop_stop()
+    try:
+        c.disconnect()
+    except Exception:
+        pass
+    if "rc" not in result:
+        return False, "Keine Antwort vom Broker (Zeitüberschreitung)"
+    rc = result["rc"]
+    if rc == 0:
+        return True, "Verbindung erfolgreich"
+    msg = str(rc)
+    if "auth" in msg.lower() or "credential" in msg.lower() or getattr(rc, "value", 0) in (4, 5, 134, 135):
+        return False, "Benutzername oder Passwort falsch"
+    return False, f"Broker lehnt ab: {msg}"

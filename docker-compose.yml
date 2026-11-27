@@ -9,13 +9,18 @@ services:
     container_name: argus
     restart: unless-stopped
     shm_size: 256mb
+    # Für die ONVIF-Kamerasuche in den Einstellungen: Host-Netzwerk verwenden
+    # (dann den "ports:"-Block unten entfernen)
+    # network_mode: host
     environment:
       - TZ=Europe/Berlin
     ports:
-      - "5080:5080"                # Web-Oberfläche + API
-      - "8554:8554"                # RTSP-Restream (z. B. für Home Assistant)
-      - "8555:8555/tcp"            # WebRTC (Live-Bild mit minimaler Latenz)
-      - "8555:8555/udp"
+      # Host-Ports per .env änderbar (z. B. wenn Frigate parallel läuft):
+      #   ARGUS_WEB_PORT=5080  ARGUS_RTSP_PORT=8564  ARGUS_WEBRTC_PORT=8565
+      - "${ARGUS_WEB_PORT:-5080}:5080"                 # Web-Oberfläche + API
+      - "${ARGUS_RTSP_PORT:-8554}:8554"                # RTSP-Restream (z. B. für Home Assistant)
+      - "${ARGUS_WEBRTC_PORT:-8555}:8555/tcp"          # WebRTC (Live-Bild mit minimaler Latenz)
+      - "${ARGUS_WEBRTC_PORT:-8555}:8555/udp"
       # - "1984:1984"              # go2rtc direkt (optional, nicht nötig)
     volumes:
       - ./config:/config

@@ -1,4 +1,5 @@
 // Argus NVR – Web-Oberfläche (ohne Build-Schritt, reines ES-Modul)
+import { settingsPage } from './settings.js';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const main = $('#main');
@@ -153,7 +154,7 @@ let cleanup = null;
 pages.live = async () => {
   main.innerHTML = `<div class="page-head"><h1>Live</h1><span class="sub">${state.cams.length} Kameras</span></div><div class="grid-live"></div>`;
   const grid = $('.grid-live');
-  if (!state.cams.length) grid.innerHTML = `<div class="empty">${ICON.empty}Keine Kameras konfiguriert – siehe config/config.yml</div>`;
+  if (!state.cams.length) grid.innerHTML = `<div class="empty">${ICON.empty}Noch keine Kamera eingerichtet.<div style="margin-top:14px"><a class="btn primary" href="#/settings">Kamera hinzufügen</a></div></div>`;
   const tiles = state.cams.map((c) => { const t = camTile(c); grid.append(t); return t; });
   const fn = (m) => {
     if (m.type === 'counts') tiles.find((t) => t.dataset.cam === m.camera)?.updateCounts(m.counts);
@@ -166,10 +167,12 @@ pages.live = async () => {
 async function openCamera(cam) {
   const card = openModal(`
     <div class="m-head"><h2>${esc(cam.name)}</h2><span class="spacer"></span>
+      <button class="btn small" id="cam-edit">Einstellungen</button>
       <span style="color:var(--muted)">Erkennung</span><button class="switch ${cam.stats?.enabled !== false ? 'on' : ''}" id="det"></button>
       <button class="btn icon" data-close>${ICON.close}</button></div>
     <div class="m-body"><div id="tile"></div><h3 style="margin:0;font-size:15px">Letzte Ereignisse</h3><div class="grid-events" id="cam-ev"></div></div>`, true);
   const tile = camTile(cam, { big: true }); $('#tile', card).append(tile);
+  $('#cam-edit', card).onclick = () => { state.editCam = cam.id; closeModal(); location.hash = '#/settings'; };
   $('#det', card).onclick = async (e) => {
     const on = !e.currentTarget.classList.contains('on');
     await api(`/api/cameras/${cam.id}/detect`, { method: 'POST', json: { enabled: on } });
@@ -495,8 +498,20 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 
+const helpers = () => ({ api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig });
+pages.settings = () => { const edit = state.editCam; state.editCam = null; return settingsPage(helpers(), edit); };
+
+async function reloadConfig() {
+  const cfg = await api('/api/config');
+  state.cams = cfg.cameras;
+  state.facesEnabled = !!cfg.faces_active;
+  cfg.cameras.forEach((c) => (state.counts[c.id] ??= c.counts));
+  return cfg;
+}
+
 (async function boot() {
   const cfg = await api('/api/config');
+  if (!cfg.cameras.length && !location.hash) location.hash = '#/settings';
   state.cams = cfg.cameras;
   state.facesEnabled = !!cfg.faces_active;
   cfg.cameras.forEach((c) => (state.counts[c.id] = c.counts));

@@ -52,17 +52,32 @@ echo <TOKEN> | docker login ghcr.io -u rhineworks-code --password-stdin
 
 git clone https://github.com/rhineworks-code/argusnvr.git ~/argusnvr
 cd ~/argusnvr
-cp config/config.example.yml config/config.yml
-nano config/config.yml          # Kameras, MQTT, Server-IP für WebRTC eintragen
 docker compose pull && docker compose up -d
 docker compose logs -f argus
 ```
+
+Danach **http://SERVER:5080** öffnen – beim ersten Start landest du direkt in den **Einstellungen**
+und richtest dort Kameras, MQTT/Home Assistant und alles Weitere ein.
 
 **Updates:** `./update.sh` (holt Repo + neuestes Image, startet neu, räumt alte Images weg).
 
 Selbst bauen statt laden (z. B. anderes YOLO-Modell): `docker compose build && docker compose up -d` – erster Build ~10 min.
 
 Oberfläche: **http://SERVER:5080** · API-Doku: **http://SERVER:5080/api/docs**
+
+## Einstellungen in der Oberfläche
+
+Alles lässt sich unter **Einstellungen** eintragen – Änderungen wirken sofort, ohne Container-Neustart.
+Neu gestartet wird nur, was betroffen ist (z. B. nur die geänderte Kamera).
+
+* **Kameras:** Hersteller-Vorlagen (Hikvision, Dahua, Reolink, Tapo, Axis, Foscam, Uniview, ONVIF) erzeugen die
+  RTSP-Adressen aus IP/Benutzer/Passwort. „Testen“ zeigt Codec, Auflösung, fps und ein Vorschaubild.
+* **Zonen & Masken** werden direkt ins Kamerabild geklickt (Punkte ziehen, Doppelklick löscht).
+* **ONVIF-Suche** findet Kameras im Netzwerk – dafür muss der Container im Host-Netzwerk laufen
+  (`network_mode: host` in `docker-compose.yml`, siehe Kommentar dort).
+* **Erkennung, Gesichter, Aufnahme & Speicher, Home Assistant (mit Verbindungstest), Zugang & WebRTC.**
+* Gespeichert wird in `config/config.yml` (vorheriger Stand als `config.yml.bak`), Export/Import oben rechts.
+  Die Datei kann weiterhin per Hand bearbeitet werden – dann den Container neu starten.
 
 Beim Start im Log prüfen:
 
@@ -200,3 +215,4 @@ Vollständig unter `/api/docs`.
 | Zu viele Fehlalarme | `objects.filters` (min_score, min_area), Masken für Bäume/Straße, `motion.threshold` erhöhen |
 | Gesichter werden nicht erkannt | Erkennungsauflösung erhöhen, `faces.min_face_size` senken, mehr Referenzbilder |
 | Hinter Nginx Proxy Manager | „Websockets Support“ aktivieren |
+| `port is already allocated` (z. B. Frigate läuft parallel) | `.env` neben `docker-compose.yml` anlegen: `ARGUS_RTSP_PORT=8564` und `ARGUS_WEBRTC_PORT=8565`; in den Einstellungen als WebRTC-Adresse dann `SERVER-IP:8565` eintragen |

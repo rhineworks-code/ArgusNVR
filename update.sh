@@ -6,11 +6,6 @@ cd "$(dirname "$0")"
 echo "==> Repo aktualisieren"
 git pull --ff-only
 
-if [ ! -f config/config.yml ]; then
-  echo "!! config/config.yml fehlt – Vorlage: cp config/config.example.yml config/config.yml"
-  exit 1
-fi
-
 echo "==> Image laden"
 docker compose pull
 

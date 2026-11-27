@@ -68,6 +68,10 @@ class Go2rtc:
                     log.info("go2rtc: %s", line[-300:])
             self.proc.wait()
             if self.running:
+                if getattr(self, "_quick", False):
+                    self._quick = False
+                    time.sleep(0.3)
+                    continue
                 log.warning("go2rtc beendet (Code %s) – Neustart in 3 s", self.proc.returncode)
                 time.sleep(3)
 
@@ -75,3 +79,41 @@ class Go2rtc:
         self.running = False
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
+
+    # ------------------------------------------------------------------ Live-Änderungen
+    def write(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.path.write_text(yaml.safe_dump(build_config(cfg), sort_keys=False))
+
+    def restart(self, cfg: Config) -> None:
+        """Neue Konfiguration schreiben und go2rtc neu starten (z. B. WebRTC-Kandidaten geändert)."""
+        self.write(cfg)
+        if self.proc and self.proc.poll() is None:
+            self._quick = True
+            self.proc.terminate()
+        elif self.available and not self.running:
+            self.start()
+
+    def _api(self, method: str, **params) -> bool:
+        import httpx
+        try:
+            r = httpx.request(method, "http://127.0.0.1:1984/go2rtc/api/streams", params=params, timeout=10)
+            return r.status_code < 400
+        except Exception as e:
+            log.warning("go2rtc API %s: %s", method, e)
+            return False
+
+    def put_stream(self, name: str, src: str) -> bool:
+        return self._api("PUT", name=name, src=src)
+
+    def delete_stream(self, name: str) -> bool:
+        return self._api("DELETE", src=name)
+
+    def update_streams(self, old: dict[str, list[str]], new: dict[str, list[str]]) -> None:
+        """Nur geänderte Streams anfassen – andere Kameras laufen ungestört weiter."""
+        for name in old.keys() - new.keys():
+            self.delete_stream(name)
+        for name, src in new.items():
+            if old.get(name) != src:
+                self.delete_stream(name)
+                self.put_stream(name, src[0])

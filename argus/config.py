@@ -196,8 +196,63 @@ class Paths:
 
 
 def load_config(path: Path) -> Config:
+    """Fehlt die Datei, startet Argus leer – die Einrichtung erfolgt dann in der Weboberfläche."""
     if not path.exists():
-        example = Path(__file__).resolve().parent.parent / "config" / "config.example.yml"
-        raise SystemExit(f"Keine Konfiguration unter {path} gefunden. Vorlage: {example}")
+        return Config()
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return Config.model_validate(raw)
+
+
+class _Dumper(yaml.SafeDumper):
+    """Blöcke für Abschnitte, aber kurze Listen (Objekte, Punkte) einzeilig."""
+
+
+def _repr_list(dumper, data):
+    flat = all(not isinstance(x, (dict, list)) for x in data) or \
+        all(isinstance(x, list) and all(not isinstance(y, (dict, list)) for y in x) for x in data)
+    return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=flat)
+
+
+_Dumper.add_representer(list, _repr_list)
+
+SECRET = "********"
+HEADER = ("# Argus NVR – Konfiguration\n"
+          "# Wird von der Weboberfläche (Einstellungen) geschrieben. Bearbeiten per Hand ist möglich,\n"
+          "# Kommentare gehen beim nächsten Speichern aus der Oberfläche allerdings verloren.\n"
+          "# Vorheriger Stand: config.yml.bak\n\n")
+
+
+def dump_config(cfg: Config) -> dict[str, Any]:
+    d = cfg.model_dump(mode="json")
+    for cam in d.get("cameras", {}).values():
+        cam.pop("id", None)
+    if not d.get("go2rtc"):
+        d.pop("go2rtc", None)
+    return d
+
+
+def save_config(path: Path, cfg: Config) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.with_suffix(".yml.bak").write_bytes(path.read_bytes())
+    tmp = path.with_suffix(".yml.tmp")
+    tmp.write_text(HEADER + yaml.dump(dump_config(cfg), Dumper=_Dumper, sort_keys=False, allow_unicode=True,
+                                      default_flow_style=False, width=120), encoding="utf-8")
+    tmp.replace(path)
+
+
+def public_config(cfg: Config) -> dict[str, Any]:
+    """Für die Oberfläche: Passwörter werden nicht zurückgegeben."""
+    d = dump_config(cfg)
+    for sec in ("auth", "mqtt"):
+        if d[sec].get("password"):
+            d[sec]["password"] = SECRET
+    return d
+
+
+def merge_secrets(raw: dict[str, Any], old: Config) -> dict[str, Any]:
+    for sec in ("auth", "mqtt"):
+        part = raw.get(sec) or {}
+        if part.get("password") == SECRET:
+            part["password"] = getattr(old, sec).password
+    return raw
