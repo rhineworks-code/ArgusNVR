@@ -1,6 +1,7 @@
 // CamSpire NVR – Web-Oberfläche (ohne Build-Schritt, reines ES-Modul)
 import { settingsPage } from './settings.js';
 import { historyPage } from './history.js';
+import { initAccount, logout, registerSW, renderAuthScreen } from './account.js';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const main = $('#main');
@@ -28,6 +29,11 @@ async function api(path, opts = {}) {
   const o = { ...opts, headers: { ...(opts.headers || {}) } };
   if (o.json !== undefined) { o.body = JSON.stringify(o.json); o.headers['Content-Type'] = 'application/json'; delete o.json; }
   const r = await fetch(path, o);
+  if (r.status === 401 && !path.startsWith('/api/auth/') && !document.body.classList.contains('auth-mode')) {
+    // Sitzung abgelaufen -> Anmeldung zeigen
+    initAccount(helpers());
+    renderAuthScreen(await (await fetch('/api/auth/status')).json());
+  }
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
   return r.headers.get('content-type')?.includes('json') ? r.json() : r;
 }
@@ -223,18 +229,18 @@ pages.live = async () => {
 async function openCamera(cam) {
   const card = openModal(`
     <div class="m-head"><h2>${esc(cam.name)}</h2><span class="spacer"></span>
-      <button class="btn small" id="cam-edit">Einstellungen</button>
-      <span style="color:var(--muted)">Erkennung</span><button class="switch ${cam.stats?.enabled !== false ? 'on' : ''}" id="det"></button>
+      ${can('settings') ? '<button class="btn small" id="cam-edit">Einstellungen</button>' : ''}
+      ${can('detect_toggle') ? `<span style="color:var(--muted)">Erkennung</span><button class="switch ${cam.stats?.enabled !== false ? 'on' : ''}" id="det"></button>` : ''}
       <button class="btn icon" data-close>${ICON.close}</button></div>
     <div class="m-body"><div id="tile"></div><h3 style="margin:0;font-size:15px">Letzte Ereignisse</h3><div class="grid-events" id="cam-ev"></div></div>`, true);
   const tile = camTile(cam, { big: true }); $('#tile', card).append(tile);
-  $('#cam-edit', card).onclick = () => { state.editCam = cam.id; closeModal(); location.hash = '#/settings'; };
-  $('#det', card).onclick = async (e) => {
+  if ($('#cam-edit', card)) $('#cam-edit', card).onclick = () => { state.editCam = cam.id; closeModal(); location.hash = '#/settings'; };
+  if ($('#det', card)) $('#det', card).onclick = async (e) => {
     const on = !e.currentTarget.classList.contains('on');
     await api(`/api/cameras/${cam.id}/detect`, { method: 'POST', json: { enabled: on } });
     e.currentTarget.classList.toggle('on', on);
   };
-  const evs = await api(`/api/events?camera=${cam.id}&limit=12`);
+  const evs = can('events') ? await api(`/api/events?camera=${cam.id}&limit=12`) : [];
   renderEventCards($('#cam-ev', card), evs, false);
   const fn = (m) => { if (m.type === 'counts' && m.camera === cam.id) tile.updateCounts(m.counts); };
   listeners.add(fn);
@@ -326,7 +332,7 @@ async function openEvent(id) {
     ? `<video class="m-media" id="evvideo" ${ev.clip.hls ? '' : `src="${ev.clip.url}#t=${ev.clip.offset.toFixed(1)}"`} controls autoplay muted playsinline poster="${ev.snapshot_url || ''}"></video>`
     : ev.snapshot_url ? `<img class="m-media" src="${ev.snapshot_url}">`
     : `<img class="m-media" id="livefeed" src="/api/cameras/${ev.camera}/latest.jpg?w=1280">`;
-  const faceBlock = ev.grp === 'person' && state.facesEnabled ? `
+  const faceBlock = ev.grp === 'person' && state.facesEnabled && can('events_manage') ? `
     <div class="card" style="padding:14px">
       <h3>Gesicht</h3>
       ${ev.face_thumb_url ? `<img src="${ev.face_thumb_url}" style="width:96px;border-radius:14px;display:block;margin-bottom:10px">` : '<div style="color:var(--muted);margin-bottom:10px">Kein Gesicht erfasst</div>'}
@@ -342,7 +348,7 @@ async function openEvent(id) {
   const card = openModal(`
     <div class="m-head"><span class="count c-${ev.grp}">${ICON[ev.grp] || ''} ${esc(LABEL[ev.label] || ev.label)}</span>
       <h2>${ev.sub_label ? esc(ev.sub_label) : ''}</h2><span class="spacer"></span>
-      <button class="btn icon danger" id="del" title="Löschen">${ICON.trash}</button><button class="btn icon" data-close>${ICON.close}</button></div>
+      ${can('events_manage') ? `<button class="btn icon danger" id="del" title="Löschen">${ICON.trash}</button>` : ''}<button class="btn icon" data-close>${ICON.close}</button></div>
     <div class="m-body"><div class="m-cols">
       <div>${media}</div>
       <div style="display:flex;flex-direction:column;gap:14px">
@@ -356,16 +362,16 @@ async function openEvent(id) {
           ${ev.zones?.length ? `<dt>Zonen</dt><dd>${ev.zones.map(esc).join(', ')}</dd>` : ''}
         </dl></div>
         ${faceBlock}
-        ${ev.snapshot_url ? `<a class="btn small" href="${ev.snapshot_url}" download>Snapshot herunterladen</a>` : ''}
-        ${ev.clip ? `<a class="btn small" href="${ev.clip.url}" download>Clip herunterladen (MP4)</a>` : ''}
-        <a class="btn small" href="#/history?cam=${ev.camera}&t=${(ev.start_ts - 5).toFixed(0)}" id="ev-hist">Im Verlauf ansehen</a>
+        ${ev.snapshot_url && can('download') ? `<a class="btn small" href="${ev.snapshot_url}" download>Snapshot herunterladen</a>` : ''}
+        ${ev.clip && can('download') ? `<a class="btn small" href="${ev.clip.url}" download>Clip herunterladen (MP4)</a>` : ''}
+        ${can('history') ? `<a class="btn small" href="#/history?cam=${ev.camera}&t=${(ev.start_ts - 5).toFixed(0)}" id="ev-hist">Im Verlauf ansehen</a>` : ''}
       </div></div></div>`);
   const evv = $('#evvideo', card);
   if (evv && ev.clip?.hls) playHls(evv, ev.clip.hls, ev.clip.offset);
   const eh = $('#ev-hist', card); if (eh) eh.onclick = () => closeModal();
   const lf = $('#livefeed', card);
   if (lf) { const t = setInterval(() => { lf.src = `/api/cameras/${ev.camera}/latest.jpg?w=1280&t=${Date.now()}`; }, 500); card.onclose = () => clearInterval(t); }
-  $('#del', card).onclick = async () => {
+  if ($('#del', card)) $('#del', card).onclick = async () => {
     if (!confirm('Ereignis und zugehörige Aufnahme löschen?')) return;
     await api(`/api/events/${id}`, { method: 'DELETE' }); closeModal(); route();
   };
@@ -392,10 +398,10 @@ pages.faces = async () => {
     <div class="page-head"><h1>Gesichter</h1>
       <div class="tabs"><button data-t="unknown" class="${tab === 'unknown' ? 'on' : ''}">Unbekannt (${clusters.length})</button>
         <button data-t="persons" class="${tab === 'persons' ? 'on' : ''}">Personen (${state.persons.length})</button></div>
-      <span class="spacer"></span><button class="btn primary" id="add">${ICON.plus} Person anlegen</button></div>
+      <span class="spacer"></span>${can('faces') ? `<button class="btn primary" id="add">${ICON.plus} Person anlegen</button>` : ''}</div>
     <div id="fc"></div>`;
   $$('.tabs button').forEach((b) => (b.onclick = () => { state.facesTab = b.dataset.t; route(); }));
-  $('#add').onclick = async () => {
+  if ($('#add')) $('#add').onclick = async () => {
     const name = prompt('Name der Person'); if (!name) return;
     const r = await api('/api/faces/persons', { method: 'POST', json: { name } }); await loadPersons();
     openPerson(state.persons.find((p) => p.id === r.id));
@@ -471,7 +477,7 @@ async function openPerson(p) {
 }
 
 async function updateUnknownBadge(n) {
-  if (n === undefined) { if (!state.facesEnabled) return; try { n = (await api('/api/faces/clusters')).length; } catch { return; } }
+  if (n === undefined) { if (!state.facesEnabled || !(can('events') || can('faces'))) return; try { n = (await api('/api/faces/clusters')).length; } catch { return; } }
   const b = $('#nav-unknown'); b.hidden = !n; b.textContent = n;
 }
 
@@ -554,17 +560,20 @@ $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') clos
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').hidden) closeModal(); });
 
 async function route() {
-  const page = (location.hash.replace(/^#\//, '') || 'live').split('?')[0];
+  let page = (location.hash.replace(/^#\//, '') || 'live').split('?')[0];
+  if (state.me && !pageAllowed(page)) page = ['live', 'events', 'history'].find(pageAllowed) || 'settings';
   const fn = pages[page] || pages.live;
   if (cleanup) { try { cleanup(); } catch {} cleanup = null; }
   if (!$('#modal').hidden) closeModal();
   state.page = page;
   $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === page));
   try { cleanup = (await fn()) || null; } catch (e) { main.innerHTML = `<div class="empty">Fehler: ${esc(e.message)}</div>`; }
+  const ev = new URLSearchParams(location.hash.split('?')[1] || '').get('ev');
+  if (page === 'events' && ev) openEvent(ev).catch(() => toast('Ereignis nicht mehr vorhanden'));
 }
 window.addEventListener('hashchange', route);
 
-const helpers = () => ({ api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig, camTile, state });
+function helpers() { return { api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig, camTile, state, can }; }
 pages.history = () => {
   const q = new URLSearchParams(location.hash.split('?')[1] || '');
   return historyPage(helpers(), Object.fromEntries(q));
@@ -574,18 +583,44 @@ pages.settings = () => { const edit = state.editCam; state.editCam = null; retur
 async function reloadConfig() {
   const cfg = await api('/api/config');
   state.cams = cfg.cameras;
+  state.me = cfg.me; applyNav();
   state.facesEnabled = !!cfg.faces_active;
   cfg.cameras.forEach((c) => (state.counts[c.id] ??= c.counts));
   return cfg;
 }
 
+const can = (p) => state.me && (state.me.is_admin || state.me.perms.includes(p));
+const PAGE_PERM = { live: ['live'], history: ['history'], events: ['events'], faces: ['events', 'faces'], system: ['system'], settings: [] };
+const pageAllowed = (pg) => (PAGE_PERM[pg] || []).length === 0 || PAGE_PERM[pg].some(can);
+
+function applyNav() {
+  $$('.nav a[data-page]').forEach((a) => { a.hidden = !pageAllowed(a.dataset.page); });
+  const st = $('.nav a[data-page="settings"] span');
+  if (st) { st.textContent = can('settings') ? 'Einstellungen' : 'Konto'; st.dataset.short = can('settings') ? 'Optionen' : 'Konto'; }
+  const me = state.me;
+  let chip = $('#me-chip');
+  if (!chip) { chip = document.createElement('div'); chip.id = 'me-chip'; chip.className = 'me-chip'; $('.nav').insertBefore(chip, $('#conn')); }
+  chip.innerHTML = `<a href="#/settings" class="me-link" title="Mein Konto"><i>${esc((me.display_name || me.username).slice(0, 1).toUpperCase())}</i><span>${esc(me.display_name || me.username)}</span></a>
+    <button class="btn icon small" id="me-out" title="Abmelden"><svg viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H3"/></svg></button>`;
+  $('#me-out').onclick = logout;
+}
+
 (async function boot() {
+  registerSW();
+  initAccount(helpers());
+  const status = await (await fetch('/api/auth/status')).json();
+  if (status.setup_required || !status.user) { renderAuthScreen(status); return; }
   const cfg = await api('/api/config');
-  if (!cfg.cameras.length && !location.hash) location.hash = '#/settings';
+  state.me = cfg.me;
+  applyNav();
+  if (!cfg.cameras.length && !location.hash && can('settings')) location.hash = '#/settings';
+  else if (!location.hash || !pageAllowed(location.hash.replace(/^#\//, '').split('?')[0])) {
+    const first = ['live', 'events', 'history'].find(pageAllowed) || 'settings'; location.hash = `#/${first}`;
+  }
   state.cams = cfg.cameras;
   state.facesEnabled = !!cfg.faces_active;
   cfg.cameras.forEach((c) => (state.counts[c.id] = c.counts));
-  await loadPersons();
+  if (can('events') || can('faces')) await loadPersons();
   connectWS();
   route();
   updateUnknownBadge();

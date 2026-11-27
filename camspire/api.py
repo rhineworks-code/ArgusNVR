@@ -3,11 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
-import hmac
 import json
 import logging
-import secrets
 import subprocess
 import time
 from pathlib import Path
@@ -73,38 +70,114 @@ class MqttTest(BaseModel):
 def create_app(ctx) -> FastAPI:
     app = FastAPI(title="CamSpire NVR", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
     paths, db = ctx.paths, ctx.db
-    secret = secrets.token_bytes(32)
     http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
     gpu_cache: dict[str, Any] = {"ts": 0, "data": None}
 
-    # ------------------------------------------------------------------ Auth
-    def _token(user: str) -> str:
-        return hmac.new(secret, user.encode(), hashlib.sha256).hexdigest()
+    # ------------------------------------------------------------------ Anmeldung & Rechte
+    auth = ctx.auth
+    PUBLIC = ("/api/health", "/api/auth/", "/static/", "/manifest.webmanifest", "/sw.js", "/favicon.ico",
+              "/api/push/image/")
+    import re as _re
+    R_CAM = _re.compile(r"^/api/cameras/([a-z0-9_]+)/")
+    R_EVENT = _re.compile(r"^/api/events/([^/]+)(/.*)?$")
 
-    def _authorized(headers, cookies) -> bool:
-        a = ctx.cfg.auth
-        if not a.username:
-            return True
-        if hmac.compare_digest(cookies.get("camspire_session", ""), _token(a.username)):
-            return True
+    def _token_from(headers, cookies, query) -> str | None:
         h = headers.get("authorization", "")
-        if h.lower().startswith("basic "):
-            try:
-                u, _, p = base64.b64decode(h[6:]).decode().partition(":")
-                return hmac.compare_digest(u, a.username) and hmac.compare_digest(p, a.password)
-            except Exception:
-                return False
-        return False
+        if h.lower().startswith("bearer "):
+            return h[7:].strip()
+        return query.get("token")
+
+    def user_from(headers, cookies, query):
+        u = auth.from_session(cookies.get("camspire_session"))
+        if u is None:
+            u = auth.from_token(_token_from(headers, cookies, query))
+        return u
+
+    def stream_cam(src: str | None) -> str | None:
+        if not src:
+            return None
+        for suf in ("_sub_h264", "_h264", "_sub"):
+            if src.endswith(suf):
+                return src[: -len(suf)]
+        return src
+
+    def rule(method: str, path: str, query) -> tuple[list[str] | None, str | None, bool]:
+        """(benötigte Rechte – eines davon reicht, Kamera, nur Admin)"""
+        cam = query.get("camera")
+        m = R_CAM.match(path)
+        if m:
+            cam = m.group(1)
+        if path.startswith("/api/users"):
+            return None, None, True
+        if path.startswith(("/api/settings", "/api/storage")):
+            return ["settings"], None, False
+        if path.startswith("/api/faces"):
+            return (["events", "faces"] if method == "GET" else ["faces"]), None, False
+        if path.endswith(("/clip.mp4", "/export.mp4")) or path.startswith("/api/clips/"):
+            perm = ["download"]
+        elif path.startswith("/api/events"):
+            perm = ["events"] if method == "GET" else ["events_manage"]
+        elif path.startswith("/api/timeline"):
+            perm = ["history"]
+        elif path.startswith("/api/segments/") or path.endswith("/vod.m3u8"):
+            perm = ["history", "events"]        # Ereignis-Clips laufen ebenfalls über HLS
+        elif m and path.endswith("/detect"):
+            perm = ["detect_toggle"]
+        elif m and path.endswith((".jpg",)):
+            perm = ["live", "events", "history", "settings"]
+        elif path.startswith("/media/"):
+            perm = ["events", "faces"]
+            parts = path.split("/")
+            if len(parts) > 3 and parts[2] == "snapshots":
+                cam = parts[3]
+        elif path.startswith("/go2rtc/"):
+            tail = path[len("/go2rtc/"):]
+            if not (tail.endswith(".js") or tail.startswith("api/ws") or tail.startswith("api/webrtc")):
+                return None, None, True
+            perm = ["live", "history"]
+            cam = stream_cam(query.get("src")) if not tail.endswith(".js") else None
+        else:
+            perm = None
+        me = R_EVENT.match(path)
+        if me and me.group(1) not in ("summary",):
+            r = db.one("SELECT camera FROM events WHERE id=?", (me.group(1),))
+            cam = r["camera"] if r else cam
+        if path.startswith("/api/segments/"):
+            sid = path.rsplit("/", 1)[-1].split(".")[0]
+            r = db.one("SELECT camera FROM segments WHERE id=?", (sid,)) if sid.isdigit() else None
+            cam = r["camera"] if r else cam
+        if path.startswith("/api/clips/"):
+            r = db.one("SELECT camera FROM clips WHERE id=?", (path.rsplit("/", 1)[-1].split(".")[0],))
+            cam = r["camera"] if r else cam
+        return perm, cam, False
+
+    def allowed_cams(request) -> list[str] | None:
+        u = request.state.user
+        return None if u.is_admin or u.cameras is None else list(u.cameras)
+
+    def _fail(status: int, msg: str, setup: bool = False):
+        return JSONResponse({"detail": msg, "setup": setup}, status_code=status)
 
     @app.middleware("http")
     async def auth_mw(request: Request, call_next):
-        if request.url.path == "/api/health" or _authorized(request.headers, request.cookies):
-            resp = await call_next(request)
-            if ctx.cfg.auth.username and "camspire_session" not in request.cookies:
-                resp.set_cookie("camspire_session", _token(ctx.cfg.auth.username), httponly=True, samesite="lax",
-                                max_age=30 * 86400)
-            return resp
-        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="CamSpire"'})
+        path = request.url.path
+        request.state.user = None
+        if path == "/" or path.startswith(PUBLIC):
+            u = user_from(request.headers, request.cookies, request.query_params)
+            request.state.user = u
+            return await call_next(request)
+        u = user_from(request.headers, request.cookies, request.query_params)
+        if u is None:
+            return _fail(401, "Nicht angemeldet", setup=not auth.has_users())
+        request.state.user = u
+        perm, cam, admin_only = rule(request.method, path, request.query_params)
+        if admin_only and not u.is_admin:
+            return _fail(403, "Nur für Admins")
+        if perm and not any(u.can(p) for p in perm):
+            return _fail(403, "Dafür fehlt dir die Berechtigung")
+        if cam and not u.cam_ok(cam):
+            return _fail(403, "Kein Zugriff auf diese Kamera")
+        return await call_next(request)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -130,15 +203,20 @@ def create_app(ctx) -> FastAPI:
                 "transcode": tc, "codecs": ctx.codecs.get(cid, {}),
                 "stats": w.stats() if w else None, "counts": ctx.events.counts.get(cid, {})}
 
+    def _cams_for(request) -> list[str]:
+        u = request.state.user
+        return [c for c in ctx.cfg.cameras if u.cam_ok(c)]
+
     @app.get("/api/config")
-    def config():
-        return {"version": __version__, "cameras": [_cam_info(c) for c in ctx.cfg.cameras],
+    def config(request: Request):
+        return {"version": __version__, "cameras": [_cam_info(c) for c in _cams_for(request)],
+                "me": request.state.user.public(), "setup": False,
                 "record": ctx.cfg.record.model_dump(), "faces": ctx.cfg.faces.model_dump(), "faces_active": bool(ctx.faces),
                 "objects": ctx.cfg.objects.track, "mqtt": {"enabled": ctx.cfg.mqtt.enabled, "prefix": ctx.cfg.mqtt.topic_prefix}}
 
     @app.get("/api/cameras")
-    def cameras():
-        return [_cam_info(c) for c in ctx.cfg.cameras]
+    def cameras(request: Request):
+        return [_cam_info(c) for c in _cams_for(request)]
 
     @app.get("/api/cameras/{cid}/latest.jpg")
     def latest(cid: str, boxes: int = 1, w: int = 960):
@@ -239,11 +317,22 @@ def create_app(ctx) -> FastAPI:
         ev["active"] = ev.get("end_ts") is None
         return ev
 
+    def _cam_sql(request, col: str = "camera") -> tuple[str, list]:
+        cams = allowed_cams(request)
+        if cams is None:
+            return "", []
+        if not cams:
+            return " AND 0", []
+        return f" AND {col} IN ({','.join('?' * len(cams))})", cams
+
     @app.get("/api/events")
-    def events(camera: str | None = None, grp: str | None = None, label: str | None = None,
+    def events(request: Request, camera: str | None = None, grp: str | None = None, label: str | None = None,
                person: str | None = None, before: float | None = None, after: float | None = None,
                limit: int = 60):
         sql, args = "SELECT * FROM events WHERE 1=1", []
+        cs, ca = _cam_sql(request)
+        sql += cs
+        args += ca
         for col, val in (("camera", camera), ("grp", grp), ("label", label)):
             if val:
                 vals = val.split(",")
@@ -267,13 +356,14 @@ def create_app(ctx) -> FastAPI:
         return [_event_out(e) for e in db.query(sql, args)]
 
     @app.get("/api/events/summary")
-    def events_summary(days: int = 7):
+    def events_summary(request: Request, days: int = 7):
         since = time.time() - days * 86400
-        rows = db.query("SELECT camera, grp, COUNT(*) AS n FROM events WHERE start_ts>? GROUP BY camera, grp", (since,))
+        cs, ca = _cam_sql(request)
+        rows = db.query(f"SELECT camera, grp, COUNT(*) AS n FROM events WHERE start_ts>?{cs} GROUP BY camera, grp", (since, *ca))
         hours = db.query("SELECT CAST(strftime('%H', start_ts, 'unixepoch', 'localtime') AS INTEGER) AS h, "
-                         "COUNT(*) AS n FROM events WHERE start_ts>? GROUP BY h", (since,))
+                         f"COUNT(*) AS n FROM events WHERE start_ts>?{cs} GROUP BY h", (since, *ca))
         people = db.query("SELECT sub_label AS name, COUNT(*) AS n, MAX(start_ts) AS last FROM events "
-                          "WHERE start_ts>? AND sub_label IS NOT NULL GROUP BY sub_label ORDER BY n DESC", (since,))
+                          f"WHERE start_ts>?{cs} AND sub_label IS NOT NULL GROUP BY sub_label ORDER BY n DESC", (since, *ca))
         return {"by_camera": rows, "by_hour": hours, "people": people}
 
     @app.get("/api/events/{eid}")
@@ -476,8 +566,16 @@ def create_app(ctx) -> FastAPI:
         return data
 
     @app.get("/api/stats")
-    def stats():
-        return ctx.stats(gpu=_gpu())
+    def stats(request: Request):
+        st = ctx.stats(gpu=_gpu())
+        u = request.state.user
+        if not u.is_admin:
+            for k in ("cameras", "recording", "codecs"):
+                st[k] = {c: v for c, v in (st.get(k) or {}).items() if u.cam_ok(c)}
+            if not u.can("system"):
+                st.pop("storage", None)
+                st.pop("gpu", None)
+        return st
 
     @app.post("/api/storage/cleanup")
     async def storage_cleanup():
@@ -639,9 +737,26 @@ def create_app(ctx) -> FastAPI:
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     # ------------------------------------------------------------------ WebSocket Push
+    def _ws_visible(u, msg: dict) -> dict | None:
+        cam = msg.get("camera") or (msg.get("event") or {}).get("camera") or (msg.get("clip") or {}).get("camera")
+        if cam and not u.cam_ok(cam):
+            return None
+        if msg.get("type") == "event" and not u.can("events"):
+            return None
+        if msg.get("type") == "stats" and not u.is_admin:
+            st = dict(msg["stats"])
+            for k in ("cameras", "recording", "codecs"):
+                st[k] = {c: v for c, v in (st.get(k) or {}).items() if u.cam_ok(c)}
+            if not u.can("system"):
+                st.pop("storage", None)
+                st.pop("gpu", None)
+            return {**msg, "stats": st}
+        return msg
+
     @app.websocket("/api/ws")
     async def ws(sock: WebSocket):
-        if not _authorized(sock.headers, sock.cookies):
+        u = user_from(sock.headers, sock.cookies, sock.query_params)
+        if u is None:
             await sock.close(code=4401)
             return
         await sock.accept()
@@ -650,8 +765,9 @@ def create_app(ctx) -> FastAPI:
         try:
             await sock.send_json({"type": "hello", "version": __version__})
             while True:
-                msg = await q.get()
-                await sock.send_text(json.dumps(msg, default=str))
+                msg = _ws_visible(u, await q.get())
+                if msg is not None:
+                    await sock.send_text(json.dumps(msg, default=str))
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
@@ -660,7 +776,10 @@ def create_app(ctx) -> FastAPI:
     # ------------------------------------------------------------------ go2rtc Proxy (ein Port für alles)
     @app.websocket("/go2rtc/{path:path}")
     async def go2rtc_ws(sock: WebSocket, path: str):
-        if not _authorized(sock.headers, sock.cookies):
+        u = user_from(sock.headers, sock.cookies, sock.query_params)
+        cam = stream_cam(sock.query_params.get("src"))
+        if u is None or not (u.can("live") or u.can("history")) or not path.startswith("api/ws") \
+                or (cam and not u.cam_ok(cam)) or (cam and cam not in ctx.cfg.cameras and not u.is_admin):
             await sock.close(code=4401)
             return
         import websockets
@@ -720,8 +839,23 @@ def create_app(ctx) -> FastAPI:
 
     @app.get("/manifest.webmanifest")
     def manifest():
-        return JSONResponse({"name": "CamSpire NVR", "short_name": "CamSpire", "start_url": "/", "display": "standalone",
-                             "background_color": "#0b1020", "theme_color": "#0b1020",
-                             "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]})
+        icons = [{"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+                 {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+                 {"src": "/static/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+                 {"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+        return JSONResponse({"id": "/", "name": "CamSpire NVR", "short_name": "CamSpire", "start_url": "/",
+                             "scope": "/", "display": "standalone", "orientation": "any", "lang": "de",
+                             "description": "Videoüberwachung mit KI-Erkennung",
+                             "background_color": "#0a0e1a", "theme_color": "#0a0e1a", "icons": icons,
+                             "shortcuts": [{"name": "Live", "url": "/#/live"}, {"name": "Ereignisse", "url": "/#/events"},
+                                           {"name": "Verlauf", "url": "/#/history"}]},
+                            media_type="application/manifest+json")
 
+    @app.get("/sw.js")
+    def service_worker():
+        return FileResponse(WEB / "sw.js", media_type="text/javascript",
+                            headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+    from .api_auth import register as _register_auth
+    _register_auth(app, ctx, paths, db)
     return app

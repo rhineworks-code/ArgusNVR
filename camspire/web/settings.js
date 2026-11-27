@@ -1,3 +1,4 @@
+import { accountTab, initAccount, usersTab } from './account.js';
 // CamSpire NVR – Einstellungen (Kameras, Erkennung, Gesichter, Aufnahme, Home Assistant, Zugang)
 let H; // Helfer aus app.js: { api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig }
 
@@ -26,7 +27,7 @@ const getP = (o, p) => p.split('.').reduce((a, k) => (a == null ? a : a[k]), o);
 const setP = (o, p, v) => { const ks = p.split('.'); const last = ks.pop(); const t = ks.reduce((a, k) => (a[k] ??= {}), o); t[last] = v; };
 const slug = (s) => String(s || '').toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
   .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
-const dirty = () => JSON.stringify(S.cfg) !== S.orig;
+const dirty = () => !!S.cfg && JSON.stringify(S.cfg) !== S.orig;
 const maskUrl = (u) => String(u || '').replace(/\/\/([^:@/]+):([^@/]+)@/, '//$1:•••@');
 
 // ---------------------------------------------------------------- Formular-Bausteine
@@ -100,19 +101,26 @@ async function save(msg) {
 }
 
 function updateBar() {
-  const bar = H.$('#savebar'); if (bar) bar.hidden = !dirty();
+  const bar = H.$('#savebar'); if (bar) bar.hidden = !S.cfg || !dirty();
 }
 
 // ---------------------------------------------------------------- Seite
 export async function settingsPage(helpers, editId = null) {
   H = helpers;
-  await load();
-  if (S.meta.first_run && !Object.keys(S.cfg.cameras).length) S.tab = 'cameras';
-  const tabs = [['cameras', 'Kameras'], ['detect', 'Erkennung'], ['faces', 'Gesichter'], ['record', 'Aufnahme & Speicher'], ['ha', 'Home Assistant'], ['access', 'Zugang & Netzwerk']];
+  initAccount(helpers);
+  const me = H.state.me;
+  const canCfg = me.is_admin || me.perms.includes('settings');
+  const tabs = [];
+  if (canCfg) tabs.push(['cameras', 'Kameras'], ['detect', 'Erkennung'], ['faces', 'Gesichter'], ['record', 'Aufnahme & Speicher'], ['ha', 'Home Assistant'], ['access', 'Netzwerk']);
+  if (me.is_admin) tabs.push(['users', 'Benutzer']);
+  tabs.push(['account', 'Mein Konto']);
+  if (canCfg) await load();
+  if (!tabs.some(([k]) => k === S.tab)) S.tab = tabs[0][0];
+  if (canCfg && S.meta.first_run && !Object.keys(S.cfg.cameras).length) S.tab = 'cameras';
   H.main.innerHTML = `
-    <div class="page-head"><h1>Einstellungen</h1><span class="spacer"></span>
-      <a class="btn small" href="/api/settings/export">Exportieren</a>
-      <label class="btn small">Importieren<input type="file" accept=".yml,.yaml" hidden id="imp"></label></div>
+    <div class="page-head"><h1>${canCfg ? 'Einstellungen' : 'Mein Konto'}</h1><span class="spacer"></span>
+      ${canCfg ? `<a class="btn small" href="/api/settings/export">Exportieren</a>
+      <label class="btn small">Importieren<input type="file" accept=".yml,.yaml" hidden id="imp"></label>` : ''}</div>
     <div class="tabs wide" id="stabs">${tabs.map(([k, l]) => `<button data-t="${k}" class="${S.tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     <div id="stab"></div>
     <div class="savebar" id="savebar" hidden><span>Ungespeicherte Änderungen</span><span class="spacer"></span>
@@ -120,7 +128,7 @@ export async function settingsPage(helpers, editId = null) {
   H.$$('#stabs button').forEach((b) => (b.onclick = () => { S.tab = b.dataset.t; H.$$('#stabs button').forEach((x) => x.classList.toggle('on', x === b)); renderTab(); }));
   H.$('#sb-save').onclick = () => save();
   H.$('#sb-reset').onclick = () => { S.cfg = JSON.parse(S.orig); renderTab(); updateBar(); };
-  H.$('#imp').onchange = async (e) => {
+  if (H.$('#imp')) H.$('#imp').onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     if (!confirm('Aktuelle Einstellungen durch die Datei ersetzen?')) return;
     const fd = new FormData(); fd.append('file', f);
@@ -137,7 +145,9 @@ export async function settingsPage(helpers, editId = null) {
 
 function renderTab() {
   const el = H.$('#stab');
-  const r = { cameras: tabCameras, detect: tabDetect, faces: tabFaces, record: tabRecord, ha: tabHA, access: tabAccess }[S.tab];
+  const r = { cameras: tabCameras, detect: tabDetect, faces: tabFaces, record: tabRecord, ha: tabHA, access: tabAccess,
+    users: usersTab, account: accountTab }[S.tab];
+  H.$('#savebar').hidden = !['cameras', 'detect', 'faces', 'record', 'ha', 'access'].includes(S.tab) || !dirty();
   r(el);
 }
 
@@ -187,7 +197,7 @@ export function openCameraEditor(id, preset = null) {
     <div class="m-body cam-editor">
       <section><h3>Allgemein</h3>
         ${row('Name', text('name', 'z. B. Einfahrt', 'text', 'cam'))}
-        ${row('ID', `<input type="text" id="c-id" ${isNew ? '' : 'disabled'} value="${H.esc(st.id)}" placeholder="wird aus dem Namen erzeugt">`, 'für MQTT/Home Assistant, a–z 0–9 _')}
+        ${row('ID', `<input type="text" id="c-id" value="${H.esc(st.id)}" placeholder="wird aus dem Namen erzeugt" autocapitalize="none" spellcheck="false">`, isNew ? 'für MQTT/Home Assistant, a–z 0–9 _' : 'änderbar – Aufnahmen und Ereignisse werden übernommen, in Home Assistant entstehen neue Entitäten')}
       </section>
       <section><h3>Verbindung</h3>
         <div class="tpl card">
@@ -245,7 +255,8 @@ export function openCameraEditor(id, preset = null) {
     sync();
   });
   const idEl = H.$('#c-id', card);
-  idEl.oninput = () => { idEl.dataset.touched = 1; idEl.value = slug(idEl.value); st.id = idEl.value; };
+  idEl.oninput = () => { idEl.dataset.touched = 1; const p = idEl.selectionStart; idEl.value = idEl.value.toLowerCase().replace(/[^a-z0-9_]/g, '_'); idEl.setSelectionRange(p, p); st.id = idEl.value; };
+  idEl.onblur = () => { idEl.value = slug(idEl.value) || (isNew ? slug(cam.name) : id); st.id = idEl.value; };
   const subEl = H.$('#c-sub', card);
   subEl.value = cam.sub || ''; subEl.oninput = () => { cam.sub = subEl.value.trim() || null; };
   const hw = H.$('#c-hw', card); hw.classList.toggle('on', cam.hwaccel === 'cuda');
@@ -293,9 +304,21 @@ export function openCameraEditor(id, preset = null) {
   H.$('#c-save', card).onclick = async () => {
     if (!cam.name?.trim()) return H.toast('Bitte einen Namen eingeben');
     if (!cam.main?.trim()) return H.toast('Bitte die Adresse des Hauptstreams eintragen');
-    const cid = isNew ? (st.id || slug(cam.name)) : id;
-    if (!/^[a-z0-9_]+$/.test(cid)) return H.toast('Ungültige ID');
+    let cid = isNew ? (st.id || slug(cam.name)) : id;
+    const newId = slug(H.$('#c-id', card).value);
+    if (!/^[a-z0-9_]+$/.test(newId || cid)) return H.toast('Ungültige ID');
     if (isNew && S.cfg.cameras[cid]) return H.toast('Diese ID gibt es schon');
+    if (!isNew && newId && newId !== id) {
+      if (S.cfg.cameras[newId]) return H.toast('Diese ID gibt es schon');
+      if (!confirm(`ID von „${id}“ in „${newId}“ ändern? Aufnahmen, Ereignisse und Rechte werden übernommen. In Home Assistant heißen die Entitäten danach camspire_${newId}_…`)) return;
+      try {
+        await H.api(`/api/settings/cameras/${id}/rename`, { method: 'POST', json: { new_id: newId } });
+        const keepDirty = clone(S.cfg); delete keepDirty.cameras[id];
+        await load();
+        Object.assign(S.cfg, { ...keepDirty, cameras: S.cfg.cameras });
+        cid = newId;
+      } catch (e) { return H.toast(`<span class="bad">${H.esc(e.message)}</span>`); }
+    }
     if (!cam.sub && cam.detect.stream === 'sub') cam.detect.stream = 'main';
     cam.record = true;
     if (!cam.events_days) cam.events_days = null;
@@ -475,9 +498,9 @@ function tabDetect(el) {
     const box = H.$('#d-filters', el);
     box.innerHTML = `<table class="ftable"><tr><th>Objekt</th><th>Mindest-Sicherheit</th><th>Mindestgröße (px²)</th></tr>${c.objects.track.map((l) => {
       const f = c.objects.filters[l] || {};
-      return `<tr data-l="${l}"><td>${H.esc(LABEL_DE[l] || l)}</td>
-        <td><div class="range"><input type="range" min="0.2" max="0.95" step="0.01" value="${f.min_score ?? 0.5}" data-k="min_score"><output>${Math.round((f.min_score ?? 0.5) * 100)} %</output></div></td>
-        <td><input type="number" min="0" step="100" value="${f.min_area ?? 0}" data-k="min_area" style="width:110px"></td></tr>`;
+      return `<tr data-l="${l}"><td class="ft-name">${H.esc(LABEL_DE[l] || l)}</td>
+        <td data-label="Mindest-Sicherheit"><div class="range"><input type="range" min="0.2" max="0.95" step="0.01" value="${f.min_score ?? 0.5}" data-k="min_score"><output>${Math.round((f.min_score ?? 0.5) * 100)} %</output></div></td>
+        <td data-label="Mindestgröße (px²)"><input type="number" min="0" step="100" value="${f.min_area ?? 0}" data-k="min_area" style="width:110px"></td></tr>`;
     }).join('')}</table>`;
     H.$$('tr[data-l] input', box).forEach((inp) => (inp.oninput = () => {
       const l = inp.closest('tr').dataset.l; const f = (c.objects.filters[l] ||= { min_score: 0.5, min_area: 0, max_area: 1e9 });
@@ -603,11 +626,6 @@ function tabHA(el) {
 function tabAccess(el) {
   const cand = { v: (S.cfg.webrtc.candidates || []).join(', ') };
   el.innerHTML = `
-    <div class="card form"><h3>Anmeldung</h3>
-      <p class="muted" style="margin-top:0">Schützt Oberfläche und API mit Benutzer/Passwort. Leer lassen, wenn z. B. Nginx Proxy Manager davor die Anmeldung übernimmt.</p>
-      ${row('Benutzer', text('auth.username', 'leer = keine Anmeldung'))}
-      ${row('Passwort', text('auth.password', '', 'password'))}
-    </div>
     <div class="card form"><h3>WebRTC (Live-Bild mit minimaler Verzögerung)</h3>
       <p class="muted" style="margin-top:0">IP und Port, unter denen der Browser den Server erreicht. Port 8555 (TCP + UDP) muss freigegeben sein. Ohne Eintrag läuft das Live-Bild über MSE (etwas mehr Verzögerung).</p>
       ${row('Adressen', `<input type="text" id="a-cand" placeholder="192.168.1.20:8555" spellcheck="false"> <button class="btn small" id="a-own">Diese Server-IP</button>`, 'mehrere mit Komma trennen')}

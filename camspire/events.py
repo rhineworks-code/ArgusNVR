@@ -86,6 +86,8 @@ class EventManager:
         if self.mqtt:
             self.mqtt.event("new", p)
             self.mqtt.snapshot(cam, t.group, ev.best_frame, ev.best_box)
+        if getattr(self, "push", None):
+            self.push.event(p)
 
     def _update(self, ev: ActiveEvent, frame: np.ndarray, ts: float) -> None:
         t = ev.track

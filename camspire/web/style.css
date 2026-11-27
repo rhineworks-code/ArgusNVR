@@ -311,3 +311,91 @@ body:has(.savebar:not([hidden])) .toasts { bottom: 96px; }
 .storage-status { padding: 10px 12px; border-radius: 11px; background: var(--panel-2); margin: 6px 0 4px; font-size: 13px; color: var(--muted); }
 .storage-status.ok { color: var(--ok); background: rgba(52,211,153,.08); }
 .storage-status.bad { color: var(--danger); background: rgba(248,113,113,.08); }
+
+/* ---------- Anmeldung ---------- */
+body.auth-mode .app { display: none; }
+.auth { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; overflow: auto;
+  background: radial-gradient(1200px 600px at 20% -10%, rgba(94,234,212,.12), transparent 60%), radial-gradient(900px 500px at 110% 110%, rgba(99,102,241,.16), transparent 60%), var(--bg); }
+.auth-card { width: min(400px, 100%); background: rgba(17,23,41,.88); backdrop-filter: blur(14px); border: 1px solid var(--line); border-radius: 22px; padding: 28px 24px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 30px 80px rgba(0,0,0,.45); }
+.auth-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+.auth-brand img { width: 48px; height: 48px; }
+.auth-brand b { font-size: 21px; display: block; letter-spacing: .2px; }
+.auth-brand span { color: var(--muted); font-size: 12px; letter-spacing: 3px; }
+.auth-card h1 { margin: 6px 0 0; font-size: 22px; }
+.auth-card p { margin: 0 0 4px; }
+.auth-card label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.auth-card label input { font-size: 16px; padding: 11px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; color: var(--text); outline: none; }
+.auth-card label input:focus { border-color: var(--accent); }
+.auth-card label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+.auth-card label.check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.btn.wide { width: 100%; justify-content: center; padding: 12px; font-size: 15px; }
+.auth-or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0; }
+.auth-or::before, .auth-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.auth-err { color: var(--danger); min-height: 18px; font-size: 13px; }
+.small { font-size: 12px; }
+
+/* ---------- Konto / Benutzer ---------- */
+.me-chip { display: flex; align-items: center; gap: 6px; margin-top: auto; padding: 8px 6px 0 8px; border-top: 1px solid var(--line); }
+.me-chip + .conn { margin-top: 0; }
+.me-link { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 6px; border-radius: 10px; }
+.me-link:hover { background: var(--panel); }
+.me-link i, .avatar-s { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; font-style: normal; font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #06101a; flex: none; }
+.avatar-s { width: 44px; height: 44px; border-radius: 14px; font-size: 18px; }
+.me-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.user-row.off { opacity: .55; }
+.list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.li { display: flex; align-items: center; gap: 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; }
+.li > div { flex: 1; min-width: 0; }
+.li small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.f-ctl.col { flex-direction: column; align-items: stretch; }
+.f-ctl.col input { max-width: 420px; }
+.perm-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; }
+.perm { display: flex; gap: 9px; align-items: center; padding: 6px 0; cursor: pointer; }
+.perm input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.steps { margin: 0; padding-left: 20px; line-height: 1.9; }
+.sub-h { margin: 16px 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+input[type=time] { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px; color: inherit; color-scheme: dark; }
+.nav a[hidden] { display: none !important; }
+
+/* ---------- Einstellungen: mobil ohne seitliches Verrutschen ---------- */
+main, #stab, .card, .f-ctl, .f-label { min-width: 0; }
+main { overflow-x: hidden; }
+.card { overflow-wrap: anywhere; }
+.chipgroup { flex-wrap: wrap; }
+.chipgroup .chips { min-width: 0; flex: 1; }
+@media (max-width: 860px) {
+  .page-head { gap: 10px; margin-bottom: 14px; }
+  .page-head h1 { font-size: 21px; }
+  .tabs.wide { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; max-width: 100%; }
+  .tabs.wide::-webkit-scrollbar { display: none; }
+  .tabs.wide button { flex: none; }
+  .card { padding: 14px; }
+  .f-ctl > input[type=text], .f-ctl > input[type=password], .f-ctl > select, .f-ctl.col input { min-width: 0; width: 100%; max-width: none; }
+  .range { max-width: none; width: 100%; }
+  .seg { width: 100%; }
+  .seg button { flex: 1 1 auto; }
+  .chipgroup { flex-direction: column; gap: 6px; }
+  .ftable, .ftable tbody, .ftable tr, .ftable td { display: block; width: 100%; }
+  .ftable tr:first-child { display: none; }
+  .ftable tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
+  .ftable td { border: 0; padding: 4px 0; }
+  .ftable td.ft-name { font-weight: 600; }
+  .ftable td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .url { flex-wrap: wrap; }
+  .url input { flex-basis: 100%; }
+  .m-body { padding: 14px; }
+  .m-foot { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+  .m-head { padding: 12px 14px; }
+  .cam-row { flex-wrap: wrap; }
+  .cam-row .btn { margin-left: auto; }
+  .perm-list { grid-template-columns: 1fr; }
+  .me-chip { display: none; }
+  .row-actions input { flex: 1; min-width: 0; }
+}
+@media (max-width: 860px) {
+  .toasts { top: calc(10px + env(safe-area-inset-top)); bottom: auto !important; left: 10px; right: 10px; }
+  .toast { max-width: none; }
+  .nav a[data-page="settings"] span { font-size: 0; }
+  .nav a[data-page="settings"] span::after { content: attr(data-short); font-size: 10px; }
+}
