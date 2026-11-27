@@ -9,6 +9,12 @@ services:
     container_name: argus
     restart: unless-stopped
     shm_size: 256mb
+    # Erlaubt das Einbinden einer Netzwerkfestplatte (SMB/NFS) aus den Einstellungen heraus
+    cap_add:
+      - SYS_ADMIN
+      - DAC_READ_SEARCH
+    security_opt:
+      - apparmor:unconfined
     # Für die ONVIF-Kamerasuche in den Einstellungen: Host-Netzwerk verwenden
     # (dann den "ports:"-Block unten entfernen)
     # network_mode: host

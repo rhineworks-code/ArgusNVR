@@ -102,6 +102,20 @@ class RecordCfg(BaseModel):
     retention: RetentionCfg = Field(default_factory=RetentionCfg)
 
 
+class StorageCfg(BaseModel):
+    """Wohin Aufnahmen geschrieben werden. Datenbank, Snapshots und Gesichter bleiben lokal."""
+    type: Literal["local", "smb", "nfs", "path"] = "local"
+    server: str = ""            # IP/Name des NAS
+    share: str = ""             # SMB: Freigabe (z. B. "surveillance" oder "video/argus"), NFS: Export-Pfad
+    username: str = ""
+    password: str = ""
+    domain: str = ""
+    smb_version: str = "3.0"
+    options: str = ""           # zusätzliche Mount-Optionen
+    path: str = ""              # type=path: im Container eingebundener Ordner (z. B. /nas)
+    subfolder: str = "argus"    # Unterordner auf dem Ziel
+
+
 class SnapshotCfg(BaseModel):
     quality: int = 75
     max_width: int = 1280
@@ -138,6 +152,10 @@ class CameraCfg(BaseModel):
     hwaccel: Literal["cuda", "none"] = "cuda"
     faces: bool = True
     record: bool = True
+    record_mode: Literal["default", "events", "continuous", "off"] = "default"   # default = globale Einstellung
+    events_days: int | None = None        # None = global
+    continuous_days: int | None = None    # None = global
+    live_transcode: Literal["auto", "on", "off"] = "auto"   # H.265 -> H.264 fürs Live-Bild im Browser
     objects: list[str] | None = None
     zones: dict[str, ZoneCfg] = Field(default_factory=dict)
     require_zone: bool = False      # True = Ereignisse nur innerhalb der Zonen
@@ -147,6 +165,11 @@ class CameraCfg(BaseModel):
     @property
     def detect_stream(self) -> str:
         return f"{self.id}_sub" if (self.detect.stream == "sub" and self.sub) else self.id
+
+    def record_mode_effective(self, glob: "RecordCfg") -> str:
+        if not self.record:
+            return "off"
+        return glob.mode if self.record_mode == "default" else self.record_mode
 
     def record_stream(self, source: str) -> str:
         return f"{self.id}_sub" if (source == "sub" and self.sub) else self.id
@@ -160,6 +183,7 @@ class Config(BaseModel):
     faces: FacesCfg = Field(default_factory=FacesCfg)
     record: RecordCfg = Field(default_factory=RecordCfg)
     snapshots: SnapshotCfg = Field(default_factory=SnapshotCfg)
+    storage: StorageCfg = Field(default_factory=StorageCfg)
     webrtc: WebRtcCfg = Field(default_factory=WebRtcCfg)
     cameras: dict[str, CameraCfg] = Field(default_factory=dict)
     go2rtc: dict[str, Any] = Field(default_factory=dict)
@@ -244,14 +268,14 @@ def save_config(path: Path, cfg: Config) -> None:
 def public_config(cfg: Config) -> dict[str, Any]:
     """Für die Oberfläche: Passwörter werden nicht zurückgegeben."""
     d = dump_config(cfg)
-    for sec in ("auth", "mqtt"):
+    for sec in ("auth", "mqtt", "storage"):
         if d[sec].get("password"):
             d[sec]["password"] = SECRET
     return d
 
 
 def merge_secrets(raw: dict[str, Any], old: Config) -> dict[str, Any]:
-    for sec in ("auth", "mqtt"):
+    for sec in ("auth", "mqtt", "storage"):
         part = raw.get(sec) or {}
         if part.get("password") == SECRET:
             part["password"] = getattr(old, sec).password

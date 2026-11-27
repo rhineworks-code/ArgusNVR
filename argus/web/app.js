@@ -1,5 +1,6 @@
 // Argus NVR – Web-Oberfläche (ohne Build-Schritt, reines ES-Modul)
 import { settingsPage } from './settings.js';
+import { historyPage } from './history.js';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const main = $('#main');
@@ -67,6 +68,7 @@ function connectWS() {
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === 'counts') state.counts[m.camera] = m.counts;
+    if (m.type === 'codecs') { const c = state.cams.find((x) => x.id === m.camera); if (c) c.codecs = m.codecs; }
     if (m.type === 'stats') { state.stats = m.stats; const n = m.stats.active_events; const b = $('#nav-active'); b.hidden = !n; b.textContent = n; }
     if (m.type === 'event' && m.action === 'new') {
       const ev = m.event; const cam = state.cams.find((c) => c.id === ev.camera);
@@ -97,9 +99,31 @@ async function loadPlayer() {
   return VideoRTC;
 }
 
+async function playHls(video, url, offset = 0) {
+  if (!window.Hls) await new Promise((r) => { const sc = document.createElement('script'); sc.src = '/static/vendor/hls.light.min.js'; sc.onload = r; sc.onerror = r; document.head.append(sc); });
+  if (window.Hls && window.Hls.isSupported()) {
+    const h = new window.Hls({ startPosition: offset });
+    h.loadSource(url); h.attachMedia(video);
+    video._hls = h;
+  } else { video.src = url; video.addEventListener('loadedmetadata', () => { video.currentTime = offset; }, { once: true }); }
+}
+
 function wsUrl(stream) { return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/go2rtc/api/ws?src=${encodeURIComponent(stream)}`; }
 
-function camTile(cam, { big = false } = {}) {
+const HEVC_OK = (() => {
+  try { return !!window.MediaSource && ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90', 'hvc1.1.6.L93.B0'].some((c) => MediaSource.isTypeSupported(`video/mp4; codecs="${c}"`)); }
+  catch { return false; }
+})();
+function pickStream(cam, big, forceH264 = false) {
+  const native = big ? cam.main_stream : cam.live_stream;
+  const h264 = big ? cam.main_stream_h264 : cam.live_stream_h264;
+  if (!h264) return native;
+  if (forceH264 || cam.transcode === 'on') return h264;
+  const codec = (big ? cam.codecs?.main : (cam.codecs?.sub || cam.codecs?.main))?.codec || '';
+  return /hevc|h265/i.test(codec) && !HEVC_OK ? h264 : native;
+}
+
+export function camTile(cam, { big = false } = {}) {
   const el = document.createElement('div');
   el.className = 'cam'; el.dataset.cam = cam.id;
   el.innerHTML = `
@@ -113,21 +137,53 @@ function camTile(cam, { big = false } = {}) {
       <div class="row counts"></div>
     </div>`;
   const wrap = $('.view-wrap', el);
-  let mode = 'live', timer = null, player = null;
-  const showLive = async () => {
-    clearInterval(timer); wrap.innerHTML = '';
+  let mode = 'live', timer = null, player = null, watchdog = null, triedH264 = false;
+  const still = (w) => `/api/cameras/${cam.id}/frame.jpg?w=${w}&t=${Date.now()}`;
+  const showLive = async (forceH264 = false) => {
+    clearInterval(timer); clearTimeout(watchdog); wrap.innerHTML = ''; el.classList.remove('ready');
+    // Sofort ein Standbild aus der Erkennung zeigen, bis das Video läuft
+    const poster = document.createElement('img');
+    poster.className = 'view poster'; poster.alt = ''; poster.src = still(big ? 1280 : 640);
+    poster.onerror = () => (poster.style.visibility = 'hidden');
+    wrap.append(poster);
     const P = await loadPlayer();
-    if (P) {
-      player = document.createElement('argus-video');
-      player.style.cssText = 'display:block;width:100%;height:100%';
-      player.background = false;
-      player.mode = 'webrtc,mse,hls,mjpeg';
-      wrap.append(player);
-      player.src = wsUrl(big ? cam.main_stream : cam.live_stream);
-      requestAnimationFrame(() => { const v = player.querySelector('video'); if (v) v.style.cssText = 'width:100%;height:100%;object-fit:contain'; });
-    } else { showAI(); }
+    if (!P) { showStill(); return; }
+    const stream = pickStream(cam, big, forceH264);
+    player = document.createElement('argus-video');
+    player.className = 'player';
+    player.background = false;
+    player.mode = 'webrtc,mse,hls,mjpeg';
+    wrap.append(player);
+    player.src = wsUrl(stream);
+    // Video läuft? (Element entsteht erst, wenn der Player im DOM hängt -> regelmäßig prüfen)
+    const started = Date.now();
+    clearInterval(timer);
+    timer = setInterval(() => {
+      const v = player.video || player.querySelector('video');
+      if (v && !v.dataset.styled) { v.style.cssText = 'width:100%;height:100%;object-fit:contain;background:transparent'; v.dataset.styled = 1; }
+      if (v && v.readyState >= 2 && v.videoWidth > 0) {
+        clearInterval(timer); el.classList.add('ready'); el.classList.remove('fallback');
+        return;
+      }
+      if (Date.now() - started > 9000) {
+        // Läuft nach 9 s nichts: H.264-Variante probieren (Browser kann H.265 oft nicht), danach Standbild
+        clearInterval(timer);
+        const alt = big ? cam.main_stream_h264 : cam.live_stream_h264;
+        if (alt && !triedH264 && stream !== alt) { triedH264 = true; showLive(true); }
+        else showStill(true);
+      }
+    }, 300);
+  };
+  const showStill = (isFallback = false) => {
+    clearTimeout(watchdog);
+    wrap.innerHTML = `<img class="view" alt="">`;
+    const img = $('img', wrap);
+    const tick = () => { const n = new Image(); n.onload = () => (img.src = n.src); n.src = still(big ? 1280 : 640); };
+    tick(); clearInterval(timer); timer = setInterval(tick, 1500);
+    el.classList.toggle('fallback', isFallback);
   };
   const showAI = () => {
+    clearTimeout(watchdog);
     wrap.innerHTML = `<img class="view" alt="">`;
     const img = $('img', wrap);
     const tick = () => { const n = new Image(); n.onload = () => (img.src = n.src); n.src = `/api/cameras/${cam.id}/latest.jpg?w=${big ? 1600 : 960}&t=${Date.now()}`; };
@@ -141,7 +197,7 @@ function camTile(cam, { big = false } = {}) {
     el.classList.toggle('alert', (c.person || 0) > 0);
   };
   el.updateStatus = (st) => { const d = $('.dot', el); d.className = `dot ${st?.status || ''}`; };
-  el.destroy = () => { clearInterval(timer); wrap.innerHTML = ''; };
+  el.destroy = () => { clearInterval(timer); clearTimeout(watchdog); wrap.innerHTML = ''; };
   el.updateCounts(state.counts[cam.id] || cam.counts);
   showLive();
   return el;
@@ -267,7 +323,7 @@ async function openEvent(id) {
   const ev = await api(`/api/events/${id}`);
   const cam = state.cams.find((c) => c.id === ev.camera);
   const media = ev.clip
-    ? `<video class="m-media" src="${ev.clip.url}#t=${ev.clip.offset.toFixed(1)}" controls autoplay muted playsinline poster="${ev.snapshot_url || ''}"></video>`
+    ? `<video class="m-media" id="evvideo" ${ev.clip.hls ? '' : `src="${ev.clip.url}#t=${ev.clip.offset.toFixed(1)}"`} controls autoplay muted playsinline poster="${ev.snapshot_url || ''}"></video>`
     : ev.snapshot_url ? `<img class="m-media" src="${ev.snapshot_url}">`
     : `<img class="m-media" id="livefeed" src="/api/cameras/${ev.camera}/latest.jpg?w=1280">`;
   const faceBlock = ev.grp === 'person' && state.facesEnabled ? `
@@ -301,8 +357,12 @@ async function openEvent(id) {
         </dl></div>
         ${faceBlock}
         ${ev.snapshot_url ? `<a class="btn small" href="${ev.snapshot_url}" download>Snapshot herunterladen</a>` : ''}
-        ${ev.clip ? `<a class="btn small" href="${ev.clip.url}" download>Clip herunterladen</a>` : ''}
+        ${ev.clip ? `<a class="btn small" href="${ev.clip.url}" download>Clip herunterladen (MP4)</a>` : ''}
+        <a class="btn small" href="#/history?cam=${ev.camera}&t=${(ev.start_ts - 5).toFixed(0)}" id="ev-hist">Im Verlauf ansehen</a>
       </div></div></div>`);
+  const evv = $('#evvideo', card);
+  if (evv && ev.clip?.hls) playHls(evv, ev.clip.hls, ev.clip.offset);
+  const eh = $('#ev-hist', card); if (eh) eh.onclick = () => closeModal();
   const lf = $('#livefeed', card);
   if (lf) { const t = setInterval(() => { lf.src = `/api/cameras/${ev.camera}/latest.jpg?w=1280&t=${Date.now()}`; }, 500); card.onclose = () => clearInterval(t); }
   $('#del', card).onclick = async () => {
@@ -445,16 +505,21 @@ pages.system = async () => {
         <dt>Übersprungen (Last)</dt><dd>${s.faces.dropped}</dd>` : ''}</dl></div>
       <div class="card"><h3>Speicher</h3>
         <div class="big">${fmtBytes(st.total)}<span style="font-size:16px;color:var(--muted)"> von ${fmtBytes(st.limit)}</span></div>
-        <div class="bar"><i style="width:${pct(st.clips)}%;background:var(--accent)"></i><i style="width:${pct(st.recordings)}%;background:var(--accent-2)"></i><i style="width:${pct(st.snapshots)}%;background:var(--person)"></i><i style="width:${pct(st.faces)}%;background:var(--animal)"></i></div>
-        <div class="legend"><span style="--c:var(--accent)">Clips ${fmtBytes(st.clips)} (${st.clip_count || 0})</span><span style="--c:var(--accent-2)">Dauer ${fmtBytes(st.recordings)}</span>
+        <div class="bar"><i style="width:${pct(st.events)}%;background:var(--accent)"></i><i style="width:${pct(st.continuous)}%;background:var(--accent-2)"></i><i style="width:${pct(st.snapshots)}%;background:var(--person)"></i><i style="width:${pct(st.faces)}%;background:var(--animal)"></i></div>
+        <div class="legend"><span style="--c:var(--accent)">Ereignisse ${fmtBytes(st.events)}</span><span style="--c:var(--accent-2)">Dauer ${fmtBytes(st.continuous)}</span>
           <span style="--c:var(--person)">Snapshots ${fmtBytes(st.snapshots)}</span><span style="--c:var(--animal)">Gesichter ${fmtBytes(st.faces)}</span></div>
-        <dl class="kv" style="margin-top:12px"><dt>Frei auf Datenträger</dt><dd>${fmtBytes(st.disk_free)}</dd></dl></div>
+        <dl class="kv" style="margin-top:12px">
+          <dt>Speicherort</dt><dd>${!st.storage || st.storage.type === 'local' ? 'lokal' : st.storage.ok ? `<span class="pill ok">NAS</span> ${esc(st.storage.target)}` : `<span class="pill bad">NAS getrennt</span>`}</dd>
+          ${st.on_nas ? `<dt>Davon auf dem NAS</dt><dd>${fmtBytes(st.on_nas)}</dd>` : ''}
+          ${st.storage?.usage ? `<dt>Frei auf dem NAS</dt><dd>${fmtBytes(st.storage.usage.free)}</dd>` : ''}
+          <dt>Frei lokal</dt><dd>${fmtBytes(st.disk_free)}</dd>
+          ${st.oldest ? `<dt>Älteste Aufnahme</dt><dd>${new Date(st.oldest * 1000).toLocaleDateString('de-DE')}</dd>` : ''}</dl></div>
       <div class="card" style="grid-column:1/-1"><h3>Kameras</h3><div style="overflow-x:auto"><table>
-        <tr><th>Kamera</th><th>Status</th><th>Auflösung</th><th>Dekodierung</th><th>Bilder/s</th><th>KI/s</th><th>Bewegung</th><th>Aufnahme</th></tr>
+        <tr><th>Kamera</th><th>Status</th><th>Auflösung</th><th>Codec</th><th>Dekodierung</th><th>Bilder/s</th><th>KI/s</th><th>Bewegung</th><th>Aufnahme</th></tr>
         ${Object.entries(s.cameras).map(([id, c]) => { const r = s.recording[id]; const cam = state.cams.find((x) => x.id === id);
           return `<tr><td>${esc(cam?.name || id)}</td><td><span class="pill ${c.status === 'online' ? 'ok' : 'bad'}">${c.status}</span></td>
-          <td>${c.resolution.join('×')}</td><td>${c.hwaccel ? 'GPU (NVDEC)' : 'CPU'}</td><td>${c.decode_fps}</td><td>${c.enabled ? c.detect_fps : 'aus'}</td>
-          <td>${c.motion ? '●' : '–'}</td><td>${r ? (r.recording ? '<span class="pill bad">● REC</span>' : (Date.now() / 1000 - r.last_segment < 15 ? 'bereit' : '<span class="pill bad">kein Stream</span>')) : 'aus'}</td></tr>`; }).join('')}
+          <td>${c.resolution.join('×')}</td><td>${esc([s.codecs?.[id]?.main?.codec, s.codecs?.[id]?.sub?.codec].filter(Boolean).join(' / ').toUpperCase() || '–')}</td><td>${c.hwaccel ? 'GPU (NVDEC)' : 'CPU'}</td><td>${c.decode_fps}</td><td>${c.enabled ? c.detect_fps : 'aus'}</td>
+          <td>${c.motion ? '●' : '–'}</td><td>${r ? (r.recording ? `<span class="pill bad">● ${r.mode === 'continuous' ? 'Dauer' : 'REC'}</span>` : (Date.now() / 1000 - r.last_segment < 15 ? 'bereit' : '<span class="pill bad">kein Stream</span>')) : 'aus'}</td></tr>`; }).join('')}
       </table></div></div>
       <div class="card"><h3>Aktivität (7 Tage, nach Uhrzeit)</h3><div class="hours">${hours.map((n, h) => `<i title="${h}:00 – ${n}" style="height:${(n / hmax) * 100}%"></i>`).join('')}</div>
         <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-top:4px"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>
@@ -481,7 +546,7 @@ function openModal(html, wide = false) {
 }
 function closeModal() {
   const m = $('#modal'), c = $('#modal-card');
-  $$('video', c).forEach((v) => v.pause());
+  $$('video', c).forEach((v) => { v.pause(); if (v._hls) v._hls.destroy(); });
   if (c.onclose) { const f = c.onclose; c.onclose = null; f(); }
   c.innerHTML = ''; m.hidden = true;
 }
@@ -492,13 +557,18 @@ async function route() {
   const page = (location.hash.replace(/^#\//, '') || 'live').split('?')[0];
   const fn = pages[page] || pages.live;
   if (cleanup) { try { cleanup(); } catch {} cleanup = null; }
+  if (!$('#modal').hidden) closeModal();
   state.page = page;
   $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === page));
   try { cleanup = (await fn()) || null; } catch (e) { main.innerHTML = `<div class="empty">Fehler: ${esc(e.message)}</div>`; }
 }
 window.addEventListener('hashchange', route);
 
-const helpers = () => ({ api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig });
+const helpers = () => ({ api, esc, toast, openModal, closeModal, ICON, $, $$, main, reloadConfig, camTile, state });
+pages.history = () => {
+  const q = new URLSearchParams(location.hash.split('?')[1] || '');
+  return historyPage(helpers(), Object.fromEntries(q));
+};
 pages.settings = () => { const edit = state.editCam; state.editCam = null; return settingsPage(helpers(), edit); };
 
 async function reloadConfig() {

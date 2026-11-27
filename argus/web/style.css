@@ -171,7 +171,8 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 @media (max-width: 860px) {
   .nav { inset: auto 0 0 0; width: auto; height: calc(64px + env(safe-area-inset-bottom)); flex-direction: row; padding: 6px 6px env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line); justify-content: space-around; }
   .brand, .conn { display: none; }
-  .nav a { flex-direction: column; gap: 3px; font-size: 11px; padding: 6px 10px; }
+  .nav a { flex-direction: column; gap: 3px; font-size: 10px; padding: 6px 2px; flex: 1; min-width: 0; align-items: center; }
+  .nav a span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .badge { position: absolute; top: 0; right: 4px; margin: 0; }
   main { margin-left: 0; padding: 18px 14px 100px; }
   .m-cols { grid-template-columns: 1fr; }
@@ -262,3 +263,51 @@ input[disabled] { opacity: .55; }
   .cam-row img { width: 84px; }
 }
 body:has(.savebar:not([hidden])) .toasts { bottom: 96px; }
+
+/* ---------- Live-Kacheln: Standbild sofort, Video blendet ein ---------- */
+.cam .view-wrap { position: relative; }
+.cam .poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.cam .player { position: absolute; inset: 0; display: block; opacity: 0; transition: opacity .25s; }
+.cam.ready .player { opacity: 1; }
+.cam.ready .poster { visibility: hidden; }
+.cam.fallback .hud::after { content: "Standbild – Live-Video nicht verfügbar"; position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  font-size: 11px; padding: 3px 9px; border-radius: 99px; background: rgba(10,14,26,.75); color: var(--muted); white-space: nowrap; }
+
+/* ---------- Verlauf ---------- */
+.datein { background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px; padding: 8px 10px; color: inherit; color-scheme: dark; }
+.hist { display: grid; grid-template-columns: 1fr 190px; gap: 16px; height: calc(100vh - 120px); min-height: 520px; }
+.hist-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+.hist-player { position: relative; background: #000; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); flex: 1; min-height: 240px; }
+.hist-player video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.hist-live { position: absolute; inset: 0; }
+.hist-live .cam { border: 0; border-radius: 0; height: 100%; aspect-ratio: auto; }
+.hist-clock { position: absolute; left: 12px; top: 12px; background: rgba(10,14,26,.7); backdrop-filter: blur(8px); padding: 5px 11px; border-radius: 10px; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; pointer-events: none; }
+.hist-badge { position: absolute; right: 12px; top: 12px; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; background: rgba(10,14,26,.7); color: var(--muted); pointer-events: none; }
+.hist-badge:empty { display: none; }
+.hist-badge.live { background: var(--danger); color: #fff; }
+.hist-live:not(:empty) ~ .hist-clock { top: 46px; }
+.hist-gap { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); background: #05070d; }
+.hist-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hist-ctl .btn.icon { min-width: 42px; justify-content: center; font-variant-numeric: tabular-nums; }
+.hist-ctl .play { min-width: 54px; font-size: 16px; }
+.live-btn.on { color: #fff; background: var(--danger); border-color: var(--danger); }
+.hist-evs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; flex: none; }
+.hev { flex: none; display: flex; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 5px 10px 5px 5px; cursor: pointer; }
+.hev:hover { border-color: #34416a; }
+.hev img, .hev .noimg { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; background: var(--panel-2); }
+.hev div { display: flex; flex-direction: column; font-size: 12px; }
+.hev span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.hist-tl { position: relative; background: linear-gradient(180deg, #0e1426, #0b1020); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; touch-action: none; user-select: none; }
+.hist-tl canvas { display: block; cursor: grab; }
+.hist-tl canvas:active { cursor: grabbing; }
+.tl-zoom { position: absolute; right: 8px; bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+.tl-zoom .btn { width: 32px; height: 32px; justify-content: center; font-size: 16px; }
+@media (max-width: 860px) {
+  .hist { grid-template-columns: 1fr; height: auto; }
+  .hist-player { flex: none; aspect-ratio: 16/9; min-height: 0; }
+  .hist-tl { height: 46vh; }
+  .hist-ctl .seg button { padding: 6px 8px; }
+}
+.storage-status { padding: 10px 12px; border-radius: 11px; background: var(--panel-2); margin: 6px 0 4px; font-size: 13px; color: var(--muted); }
+.storage-status.ok { color: var(--ok); background: rgba(52,211,153,.08); }
+.storage-status.bad { color: var(--danger); background: rgba(248,113,113,.08); }

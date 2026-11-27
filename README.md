@@ -65,6 +65,36 @@ Selbst bauen statt laden (z. B. anderes YOLO-Modell): `docker compose build && d
 
 Oberfläche: **http://SERVER:5080** · API-Doku: **http://SERVER:5080/api/docs**
 
+## Verlauf (Wiedergabe mit Zeitachse)
+
+Unter **Verlauf** läuft rechts eine Zeitachse (oben = jetzt, nach unten älter):
+türkis = Aufnahme mit Ereignis, blau = Daueraufnahme, farbige Marker = Ereignisse
+(gelb Person, blau Fahrzeug, grün Tier). Ziehen oder scrollen verschiebt die Zeit,
+Strg + Mausrad bzw. +/− zoomt, Klick auf einen Marker springt zum Ereignis.
+Abspielen mit 1×–16×, ⏮/⏭ springt zum vorigen/nächsten Ereignis, „Ausschnitt“ lädt die Stelle als MP4.
+Tastatur: Leertaste = Play/Pause, ←/→ = 5 s (mit Shift 60 s).
+
+## Speicherort: lokal oder Netzwerkfestplatte
+
+**Einstellungen → Aufnahme & Speicher → Speicherort**: Lokal, Netzwerkfestplatte (SMB, z. B. Synology),
+NFS oder ein Ordner, der auf dem Host eingebunden ist. „Verbindung testen“ prüft Anmeldung und Schreibrechte.
+Datenbank, Snapshots und Gesichter bleiben immer lokal. Fällt das NAS aus, schreibt Argus lokal weiter und
+verbindet sich automatisch neu.
+
+* Der Container braucht dafür `cap_add: SYS_ADMIN` (steht in `docker-compose.yml`).
+* Meldet der Test „Kernelmodul fehlt“: einmalig auf dem Server `sudo modprobe cifs`
+  (dauerhaft: `echo cifs | sudo tee /etc/modules-load.d/cifs.conf`).
+* Läuft Docker in einer **unprivilegierten Proxmox-LXC**, klappt Einbinden im Container nicht –
+  dann die Freigabe auf dem Proxmox-Host einbinden, per Bind-Mount in die LXC geben, in `docker-compose.yml`
+  als Volume (z. B. `- /mnt/nas:/nas`) eintragen und als Ziel „Ordner“ `/nas` wählen.
+
+## Aufnahme & Speicherdauer
+
+* Modus global oder **pro Kamera**: nur Ereignisse, Daueraufnahme oder aus.
+* **Speicherdauer** getrennt für Ereignisse und Daueraufnahme (global und pro Kamera überschreibbar).
+  Bei Daueraufnahme bleiben die Abschnitte mit Ereignissen so lange wie Ereignisse, der Rest wird früher gelöscht.
+* Harte Obergrenze in GB – die ältesten Aufnahmen werden zuerst gelöscht.
+
 ## Einstellungen in der Oberfläche
 
 Alles lässt sich unter **Einstellungen** eintragen – Änderungen wirken sofort, ohne Container-Neustart.

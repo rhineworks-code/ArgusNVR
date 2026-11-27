@@ -1,23 +1,21 @@
-"""Aufnahme ohne Neukodierung.
+"""Aufnahme ohne Neukodierung, als Segmente mit Zeitindex.
 
 ffmpeg kopiert den Stream (-c copy) in 2-Sekunden-Segmente in einen RAM-Puffer (tmpfs).
-Nur wenn ein Ereignis läuft, werden die Segmente (inkl. Vorlauf) auf die Platte
-übernommen und am Ende verlustfrei zu einer MP4 zusammengefügt. Überlappende
-Ereignisse einer Kamera teilen sich einen Clip -> kein doppelter Speicher.
+* Modus „events“: nur Segmente rund um Ereignisse (inkl. Vorlauf aus dem RAM) werden gespeichert.
+* Modus „continuous“: alle Segmente werden gespeichert; Ereignis-Segmente werden markiert
+  und können länger aufbewahrt werden als der Rest.
+Jedes Segment steht mit Start/Ende in der Datenbank -> Zeitachse, HLS-Wiedergabe und
+MP4-Export beliebiger Zeiträume, ohne doppelten Speicher.
 """
 from __future__ import annotations
 
 import logging
-import os
-import queue
 import shutil
 import subprocess
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from .config import CameraCfg, Config, Paths
 from .db import Database
@@ -36,42 +34,40 @@ def seg_start(p: Path) -> float | None:
 
 
 @dataclass
-class Session:
-    id: str
+class Window:
     start: float
-    dir: Path
     active: set[str] = field(default_factory=set)
     close_after: float | None = None
-    segs: list[tuple[float, float, Path]] = field(default_factory=list)
 
 
 class CameraRecorder:
-    def __init__(self, cfg: Config, cam: CameraCfg, paths: Paths, db: Database,
-                 on_clip: Callable[[dict], None] | None = None) -> None:
-        self.cfg, self.cam, self.paths, self.db = cfg, cam, paths, db
+    def __init__(self, cfg: Config, cam: CameraCfg, paths: Paths, db: Database, storage) -> None:
+        self.cfg, self.cam, self.paths, self.db, self.storage = cfg, cam, paths, db, storage
         self.rc = cfg.record
         self.cache = paths.cache / cam.id
-        self.tmp_root = paths.clips / ".tmp"
-        self.on_clip = on_clip
-        self.session: Session | None = None
+        self.window: Window | None = None
         self.lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self.running = False
         self.last_segment_ts = 0.0
         self.restarts = 0
-        self.codec: str | None = None
-        self._finalize_q: "queue.Queue[Session]" = queue.Queue()
+        self.stored = 0
         self._ends: dict[str, float | None] = {}
+
+    @property
+    def mode(self) -> str:
+        return self.cam.record_mode_effective(self.cfg.record)
+
+    @property
+    def session(self):          # für Statistik/Kompatibilität
+        return self.window
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
         self.running = True
         shutil.rmtree(self.cache, ignore_errors=True)
         self.cache.mkdir(parents=True, exist_ok=True)
-        self.tmp_root.mkdir(parents=True, exist_ok=True)
-        self._recover()
         threading.Thread(target=self._segmenter, name=f"rec-{self.cam.id}", daemon=True).start()
-        threading.Thread(target=self._finalizer, name=f"clip-{self.cam.id}", daemon=True).start()
 
     def stop(self) -> None:
         self.running = False
@@ -82,20 +78,14 @@ class CameraRecorder:
             except Exception:
                 self.proc.kill()
         with self.lock:
-            sess = self.session
-            if sess:
-                sess.active.clear()
-                sess.close_after = sess.close_after or time.time()
-                try:
-                    self.tick()          # letzte Segmente aus dem RAM übernehmen
-                except Exception:
-                    pass
-                self.session = None
-                if sess.segs:
-                    self._finalize(sess)
-                else:
-                    shutil.rmtree(sess.dir, ignore_errors=True)
-        self._finalize_q.put(None)       # Finalizer-Thread beenden
+            if self.window:
+                self.window.active.clear()
+                self.window.close_after = self.window.close_after or time.time()
+            try:
+                self.tick(final=True)       # letzte Segmente aus dem RAM übernehmen
+            except Exception:
+                log.exception("[%s] letzte Segmente", self.cam.id)
+            self.window = None
 
     def _segmenter(self) -> None:
         src = f"rtsp://127.0.0.1:8554/{self.cam.record_stream(self.rc.source)}"
@@ -108,8 +98,7 @@ class CameraRecorder:
             else:
                 cmd += ["-an"]
             cmd += ["-c:v", "copy", "-f", "segment", "-segment_time", str(SEG_TIME),
-                    "-segment_format", "mpegts", "-reset_timestamps", "1", "-strftime", "1",
-                    str(self.cache / f"{FMT}.ts")]
+                    "-segment_format", "mpegts", "-strftime", "1", str(self.cache / f"{FMT}.ts")]
             t0 = time.time()
             try:
                 self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -124,182 +113,138 @@ class CameraRecorder:
             self.restarts += 1
             time.sleep(min(30, 2 + self.restarts))
 
-    # ------------------------------------------------------------------ events
+    # ------------------------------------------------------------------ Ereignisse
     def event_started(self, event_id: str, ts: float) -> None:
-        if not self.cam.record or self.rc.mode == "off":
+        if self.mode == "off":
             return
+        start = ts - self.rc.pre_roll
         with self.lock:
-            if self.session is None:
-                sid = f"{int(ts)}-{uuid.uuid4().hex[:6]}"
-                d = self.tmp_root / f"{self.cam.id}__{sid}"
-                d.mkdir(parents=True, exist_ok=True)
-                self.session = Session(sid, ts - self.rc.pre_roll, d)
-                log.info("[%s] Aufnahme gestartet (%s)", self.cam.id, sid)
-            self.session.active.add(event_id)
-            self.session.close_after = None
+            if self.window is None:
+                self.window = Window(start)
+            self.window.active.add(event_id)
+            self.window.close_after = None
+        # bereits gespeicherte Segmente (Daueraufnahme) als Ereignis markieren
+        self.db.execute("UPDATE segments SET event=1 WHERE camera=? AND end_ts>? AND event=0", (self.cam.id, start))
 
     def event_ended(self, event_id: str, ts: float) -> None:
         with self.lock:
-            s = self.session
-            if s is None:
+            w = self.window
+            if w is None:
                 return
-            s.active.discard(event_id)
-            if not s.active:
-                s.close_after = max(ts, time.time() - 1) + self.rc.post_roll
+            w.active.discard(event_id)
+            if not w.active:
+                w.close_after = max(ts, time.time() - 1) + self.rc.post_roll
 
-    # ------------------------------------------------------------------ janitor
-    def tick(self, now: float | None = None) -> None:
+    # ------------------------------------------------------------------ Janitor (1×/s)
+    def tick(self, now: float | None = None, final: bool = False) -> None:
         now = now or time.time()
-        files = sorted(p for p in self.cache.glob("*.ts"))
+        files = sorted(self.cache.glob("*.ts"))
         if files:
-            self.last_segment_ts = files[-1].stat().st_mtime
+            try:
+                self.last_segment_ts = files[-1].stat().st_mtime
+            except OSError:
+                pass
+        mode = self.mode
         with self.lock:
-            # Segment-Ende = Start des Nachfolgers; einmal gemerkt, damit es stimmt,
-            # auch wenn der Nachfolger schon in einen Clip verschoben wurde
             for i, p in enumerate(files[:-1]):
                 if p.name not in self._ends:
                     self._ends[p.name] = seg_start(files[i + 1])
-            for p in files[:-1]:                    # letztes Segment wird noch geschrieben
+            complete = files if final else files[:-1]
+            for p in complete:
                 s = seg_start(p)
-                e = self._ends.get(p.name)
+                e = self._ends.get(p.name) or (s + SEG_TIME if final and s else None)
                 if s is None or e is None:
                     p.unlink(missing_ok=True)
                     continue
-                sess = self.session
-                if sess and e > sess.start and (sess.close_after is None or s < sess.close_after):
-                    dst = sess.dir / p.name
-                    shutil.move(str(p), dst)
-                    sess.segs.append((s, e, dst))
-                    if self.rc.mode == "continuous":
-                        self._keep_continuous(dst, s, link=True)
-                    if e - sess.start >= self.rc.max_clip_length:
-                        self._rotate(sess, e)
-                elif now - e > self.rc.pre_roll + 2 * SEG_TIME + 2:
-                    if self.rc.mode == "continuous" and self.cam.record:
-                        self._keep_continuous(p, s, link=False)
-                    else:
-                        p.unlink(missing_ok=True)
+                w = self.window
+                in_event = bool(w and e > w.start and (w.close_after is None or s < w.close_after))
+                if in_event or mode == "continuous":
+                    self._store(p, s, e, in_event)
+                elif now - e > self.rc.pre_roll + 2 * SEG_TIME + 2 or final:
+                    p.unlink(missing_ok=True)
             alive = {p.name for p in files}
             for k in [k for k in self._ends if k not in alive]:
                 del self._ends[k]
-            sess = self.session
-            if sess and not sess.active and sess.close_after is not None:
-                covered = bool(sess.segs) and sess.segs[-1][1] >= sess.close_after
-                if covered or now > sess.close_after + 20:
-                    self.session = None
-                    self._finalize_q.put(sess)
+            w = self.window
+            if w and not w.active and w.close_after is not None and now > w.close_after + 2 * SEG_TIME + 2:
+                self.window = None
 
-    def _rotate(self, sess: Session, at: float) -> None:
-        """Maximale Clip-Länge erreicht: Clip abschließen, nahtlos neuen beginnen."""
-        self._finalize_q.put(sess)
-        sid = f"{int(at)}-{uuid.uuid4().hex[:6]}"
-        d = self.tmp_root / f"{self.cam.id}__{sid}"
-        d.mkdir(parents=True, exist_ok=True)
-        self.session = Session(sid, at, d, active=set(sess.active), close_after=sess.close_after)
-
-    def _keep_continuous(self, src: Path, start: float, link: bool) -> None:
-        day = time.strftime("%Y-%m-%d", time.localtime(start))
-        d = self.paths.recordings / self.cam.id / day
-        d.mkdir(parents=True, exist_ok=True)
-        dst = d / src.name
+    def _store(self, src: Path, start: float, end: float, event: bool) -> None:
+        lt = time.localtime(start)
+        rel = f"recordings/{self.cam.id}/{time.strftime('%Y-%m-%d', lt)}/{time.strftime('%H', lt)}/{src.name}"
+        root, base = self.storage.target()
+        size = src.stat().st_size
         try:
-            if link:
-                os.link(src, dst)
-            else:
-                shutil.move(str(src), dst)
-        except OSError:
-            shutil.copy2(src, dst)
-            if not link:
+            dst = base / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), dst)
+        except OSError as e:
+            if root == "local":
+                log.error("[%s] Segment konnte nicht gespeichert werden: %s", self.cam.id, e)
                 src.unlink(missing_ok=True)
-
-    # ------------------------------------------------------------------ clips
-    def _finalizer(self) -> None:
-        while True:
-            sess = self._finalize_q.get()
-            if sess is None:
                 return
-            try:
-                self._finalize(sess)
-            except Exception:
-                log.exception("[%s] Clip konnte nicht erstellt werden", self.cam.id)
+            self.storage.report_failure(str(e))
+            root, base = "local", self.paths.media
+            dst = base / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), dst)
+        self.db.execute("INSERT INTO segments (camera,start_ts,end_ts,root,path,bytes,event) VALUES (?,?,?,?,?,?,?)",
+                        (self.cam.id, start, end, root, rel, size, 1 if event else 0))
+        self.stored += 1
 
-    def _probe_codec(self, f: Path) -> str:
-        if self.codec:
-            return self.codec
-        try:
-            out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                                  "stream=codec_name", "-of", "csv=p=0", str(f)],
-                                 capture_output=True, text=True, timeout=15).stdout.strip()
-            self.codec = out or "h264"
-        except Exception:
-            self.codec = "h264"
-        return self.codec
 
-    def _finalize(self, sess: Session) -> None:
-        segs = sorted(sess.segs)
-        if not segs:
-            shutil.rmtree(sess.dir, ignore_errors=True)
-            return
-        start, end = segs[0][0], segs[-1][1]
-        day = time.strftime("%Y-%m-%d", time.localtime(start))
-        out_dir = self.paths.clips / self.cam.id / day
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"{time.strftime('%H%M%S', time.localtime(start))}_{sess.id}.mp4"
-        lst = sess.dir / "list.txt"
-        lst.write_text("".join(f"file '{p.name}'\n" for _, _, p in segs))
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-               "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", "-movflags", "+faststart"]
-        if self._probe_codec(segs[0][2]) in ("hevc", "h265"):
-            cmd += ["-tag:v", "hvc1"]
-        cmd.append(str(out))
-        r = subprocess.run(cmd, capture_output=True, timeout=300)
-        if r.returncode != 0 or not out.exists():
-            log.error("[%s] concat fehlgeschlagen: %s", self.cam.id, r.stderr.decode(errors="ignore")[-300:])
-            return
-        size = out.stat().st_size
-        clip = {"id": sess.id, "camera": self.cam.id, "start_ts": start, "end_ts": end,
-                "path": str(out.relative_to(self.paths.media)), "bytes": size}
-        self.db.execute("INSERT OR REPLACE INTO clips (id,camera,start_ts,end_ts,path,bytes) VALUES (?,?,?,?,?,?)",
-                        (clip["id"], clip["camera"], start, end, clip["path"], size))
-        shutil.rmtree(sess.dir, ignore_errors=True)
-        log.info("[%s] Clip gespeichert: %s (%.0fs, %.1f MB)", self.cam.id, out.name, end - start, size / 1e6)
-        if self.on_clip:
-            self.on_clip(clip)
+# ---------------------------------------------------------------------- Abfragen & Export
+def query_segments(db: Database, camera: str, start: float, end: float, limit: int = 5000) -> list[dict]:
+    return db.query("SELECT id, start_ts, end_ts, root, path, bytes, event FROM segments "
+                    "WHERE camera=? AND end_ts>? AND start_ts<? ORDER BY start_ts LIMIT ?",
+                    (camera, start, end, limit))
 
-    def _recover(self) -> None:
-        """Nach Absturz/Neustart liegengebliebene Sitzungen noch zu Clips machen."""
-        for d in self.tmp_root.glob(f"{self.cam.id}__*"):
-            segs = []
-            files = sorted(d.glob("*.ts"))
-            for i, f in enumerate(files):
-                s = seg_start(f)
-                if s is None:
-                    continue
-                e = seg_start(files[i + 1]) if i + 1 < len(files) else s + SEG_TIME
-                segs.append((s, e or s + SEG_TIME, f))
-            sess = Session(d.name.split("__", 1)[1], segs[0][0] if segs else 0, d, segs=segs)
-            self._finalize_q.put(sess)
 
-    # ------------------------------------------------------------------ export (Daueraufnahme)
-    def export(self, start: float, end: float) -> Path | None:
-        files = []
-        for day_dir in sorted((self.paths.recordings / self.cam.id).glob("*")):
-            for f in sorted(day_dir.glob("*.ts")):
-                s = seg_start(f)
-                if s is not None and start - SEG_TIME <= s <= end:
-                    files.append(f)
-        if not files:
-            return None
-        out = self.paths.cache / f"export_{self.cam.id}_{int(start)}.mp4"
-        lst = self.paths.cache / f"export_{self.cam.id}_{int(start)}.txt"
-        lst.write_text("".join(f"file '{f}'\n" for f in files))
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-               "-i", str(lst), "-c", "copy", "-movflags", "+faststart"]
-        if self._probe_codec(files[0]) in ("hevc", "h265"):
-            cmd += ["-tag:v", "hvc1"]
-        subprocess.run(cmd + [str(out)], capture_output=True, timeout=600)
-        lst.unlink(missing_ok=True)
-        return out if out.exists() else None
+def merge_ranges(segs: list[dict], gap: float = 1.5) -> list[list]:
+    out: list[list] = []
+    for s in segs:
+        if out and s["start_ts"] - out[-1][1] <= gap and out[-1][2] == s["event"]:
+            out[-1][1] = max(out[-1][1], s["end_ts"])
+        else:
+            out.append([s["start_ts"], s["end_ts"], s["event"]])
+    return out
+
+
+def hls_playlist(segs: list[dict], url_for) -> str:
+    import math
+    from datetime import datetime, timezone
+    target = max([math.ceil(s["end_ts"] - s["start_ts"]) for s in segs] + [SEG_TIME])
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{target}", "#EXT-X-MEDIA-SEQUENCE:0",
+             "#EXT-X-PLAYLIST-TYPE:VOD"]
+    prev_end = None
+    for s in segs:
+        if prev_end is not None and abs(s["start_ts"] - prev_end) > 1.5:
+            lines.append("#EXT-X-DISCONTINUITY")
+        dt = datetime.fromtimestamp(s["start_ts"], tz=timezone.utc).isoformat(timespec="milliseconds")
+        lines.append(f"#EXT-X-PROGRAM-DATE-TIME:{dt.replace('+00:00', 'Z')}")
+        lines.append(f"#EXTINF:{s['end_ts'] - s['start_ts']:.3f},")
+        lines.append(url_for(s))
+        prev_end = s["end_ts"]
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
+
+
+def export_mp4(segs: list[dict], resolve, out: Path) -> Path | None:
+    files = [resolve(s["root"], s["path"]) for s in segs]
+    files = [f for f in files if f.exists()]
+    if not files:
+        return None
+    lst = out.with_suffix(".txt")
+    lst.write_text("".join(f"file '{f.resolve()}'\n" for f in files))
+    codec = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+                            "-of", "csv=p=0", str(files[0])], capture_output=True, text=True, timeout=15).stdout.strip()
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0",
+           "-i", str(lst), "-c", "copy", "-movflags", "+faststart"]
+    if codec in ("hevc", "h265"):
+        cmd += ["-tag:v", "hvc1"]
+    subprocess.run(cmd + [str(out)], capture_output=True, timeout=900)
+    lst.unlink(missing_ok=True)
+    return out if out.exists() and out.stat().st_size > 0 else None
 
 
 class RecordingJanitor(threading.Thread):
