@@ -37,6 +37,9 @@ class Context:
         self.db = Database(self.paths.db)
         self.hub = Hub()
         self.go2rtc = Go2rtc(self.cfg)
+        from .nas import Storage
+        self.storage = Storage(self.paths, self.cfg.storage)
+        self.codecs: dict[str, dict] = {}
         self.detector = None
         self.faces = None
         self.mqtt = None
@@ -67,7 +70,8 @@ class Context:
         if not cfg.cameras:
             log.warning("Noch keine Kamera eingerichtet – http://<server>:5080/#/settings")
 
-        self.retention = Retention(cfg, paths, self.db, self.faces)
+        self.storage.start()
+        self.retention = Retention(cfg, paths, self.db, self.faces, self.storage)
         self.retention.measure()
 
     def start(self) -> None:
@@ -75,8 +79,9 @@ class Context:
         for r in self.recorders.values():
             r.start()
         RecordingJanitor(self.recorders).start()
-        for w in self.workers.values():
+        for cid, w in self.workers.items():
             w.start()
+            threading.Thread(target=self._probe_codecs, args=(cid, self.cfg.cameras[cid]), daemon=True).start()
         self.retention.start()
         threading.Thread(target=self._stats_loop, name="stats", daemon=True).start()
 
@@ -127,9 +132,8 @@ class Context:
 
     def _make_camera(self, cid, cam, start: bool = True) -> None:
         cfg = self.cfg
-        if cfg.record.mode != "off" and cam.record:
-            rec = CameraRecorder(cfg, cam, self.paths, self.db,
-                                 on_clip=lambda c: self.hub.publish({"type": "clip", "clip": c}))
+        if cam.record_mode_effective(cfg.record) != "off":
+            rec = CameraRecorder(cfg, cam, self.paths, self.db, self.storage)
             self.recorders[cid] = rec
             if start:
                 rec.start()
@@ -137,6 +141,33 @@ class Context:
         self.workers[cid] = w
         if start:
             w.start()
+            threading.Thread(target=self._probe_codecs, args=(cid, cam), daemon=True).start()
+
+    def _probe_codecs(self, cid, cam) -> None:
+        """Codec von Haupt- und Substream ermitteln (fürs Live-Bild: H.265 braucht ggf. Umwandlung)."""
+        import subprocess
+        time.sleep(3)
+        out = {}
+        for key, stream in (("main", cid), ("sub", f"{cid}_sub" if cam.sub else None)):
+            if not stream:
+                continue
+            for _ in range(3):
+                try:
+                    r = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-timeout", "8000000",
+                                        "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height",
+                                        "-of", "csv=p=0", f"rtsp://127.0.0.1:8554/{stream}"],
+                                       capture_output=True, text=True, timeout=20)
+                    parts = r.stdout.strip().split(",")
+                    if r.returncode == 0 and parts[0]:
+                        out[key] = {"codec": parts[0], "width": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
+                                    "height": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None}
+                        break
+                except Exception:
+                    pass
+                time.sleep(5)
+        if self.workers.get(cid) is not None:
+            self.codecs[cid] = out
+            self.hub.publish({"type": "codecs", "camera": cid, "codecs": out})
 
     def _drop_camera(self, cid) -> None:
         w = self.workers.pop(cid, None)
@@ -204,6 +235,9 @@ class Context:
             self.events.faces = self.faces
             if self.retention:
                 self.retention.cfg = new
+            if dump(old.storage) != dump(new.storage):
+                self.storage.apply(new.storage)
+                changed.append("Speicherort")
                 self.retention.faces = self.faces
 
             # Kameras: nur geänderte neu starten
@@ -254,8 +288,10 @@ class Context:
                       "processed": self.faces.processed if self.faces else 0,
                       "dropped": self.faces.dropped if self.faces else 0},
             "cameras": {cid: w.stats() for cid, w in self.workers.items()},
-            "recording": {cid: {"last_segment": r.last_segment_ts, "restarts": r.restarts,
-                                "recording": r.session is not None} for cid, r in self.recorders.items()},
+            "recording": {cid: {"last_segment": r.last_segment_ts, "restarts": r.restarts, "mode": r.mode,
+                                "recording": r.mode == "continuous" or r.window is not None}
+                          for cid, r in self.recorders.items()},
+            "codecs": self.codecs,
             "storage": self.retention.usage if self.retention else {},
             "mqtt": {"enabled": self.cfg.mqtt.enabled, "connected": bool(self.mqtt and self.mqtt.connected)},
             "go2rtc": bool(self.go2rtc.proc and self.go2rtc.proc.poll() is None),

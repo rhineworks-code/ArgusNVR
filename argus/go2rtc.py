@@ -22,6 +22,12 @@ def build_config(cfg: Config) -> dict:
         streams[cid] = [cam.main]
         if cam.sub:
             streams[f"{cid}_sub"] = [cam.sub]
+        if cam.live_transcode != "off":
+            # H.264-Variante fürs Live-Bild (Browser können H.265 oft nicht). go2rtc startet die
+            # Umwandlung nur, wenn jemand zuschaut – per NVENC auf der Grafikkarte.
+            streams[f"{cid}_h264"] = [f"ffmpeg:{cid}#video=h264#hardware"]
+            if cam.sub:
+                streams[f"{cid}_sub_h264"] = [f"ffmpeg:{cid}_sub#video=h264#hardware"]
     conf = {
         "api": {"listen": ":1984", "base_path": "/go2rtc", "origin": "*"},
         "rtsp": {"listen": ":8554"},

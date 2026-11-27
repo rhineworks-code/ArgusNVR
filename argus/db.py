@@ -38,6 +38,19 @@ CREATE TABLE IF NOT EXISTS clips (
 );
 CREATE INDEX IF NOT EXISTS ix_clips_cam ON clips(camera, start_ts);
 
+CREATE TABLE IF NOT EXISTS segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera TEXT NOT NULL,
+    start_ts REAL NOT NULL,
+    end_ts REAL NOT NULL,
+    root TEXT NOT NULL DEFAULT 'local',   -- local | nas
+    path TEXT NOT NULL,
+    bytes INTEGER DEFAULT 0,
+    event INTEGER DEFAULT 0               -- 1 = gehört zu einem Ereignis (längere Aufbewahrung)
+);
+CREATE INDEX IF NOT EXISTS ix_seg_cam ON segments(camera, start_ts);
+CREATE INDEX IF NOT EXISTS ix_seg_start ON segments(start_ts);
+
 CREATE TABLE IF NOT EXISTS persons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,

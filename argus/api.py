@@ -118,10 +118,16 @@ def create_app(ctx) -> FastAPI:
     def _cam_info(cid: str) -> dict:
         cam = ctx.cfg.cameras[cid]
         w = ctx.workers.get(cid)
+        mode = cam.record_mode_effective(ctx.cfg.record)
+        tc = cam.live_transcode
         return {"id": cid, "name": cam.name, "has_sub": bool(cam.sub), "faces": cam.faces and bool(ctx.faces),
-                "record": cam.record and ctx.cfg.record.mode != "off",
+                "record": mode != "off", "record_mode": mode,
                 "zones": {n: z.points for n, z in cam.zones.items()},
                 "live_stream": f"{cid}_sub" if cam.sub else cid, "main_stream": cid,
+                # H.264-Varianten (Umwandlung auf der GPU), falls der Browser H.265 nicht kann
+                "live_stream_h264": (f"{cid}_sub_h264" if cam.sub else f"{cid}_h264") if tc != "off" else None,
+                "main_stream_h264": f"{cid}_h264" if tc != "off" else None,
+                "transcode": tc, "codecs": ctx.codecs.get(cid, {}),
                 "stats": w.stats() if w else None, "counts": ctx.events.counts.get(cid, {})}
 
     @app.get("/api/config")
@@ -151,27 +157,83 @@ def create_app(ctx) -> FastAPI:
         ctx.set_detect(cid, body.enabled)
         return {"enabled": body.enabled}
 
+    # ------------------------------------------------------------------ Aufnahmen / Zeitachse
+    from .recorder import export_mp4, hls_playlist, merge_ranges, query_segments
+
+    def _export(cid: str, start: float, end: float, name: str):
+        if end <= start or end - start > 3 * 3600:
+            raise HTTPException(400, "Ungültiger Zeitraum (max. 3 h)")
+        segs = query_segments(db, cid, start, end)
+        if not segs:
+            raise HTTPException(404, "Keine Aufnahme in diesem Zeitraum")
+        out = paths.cache / f"export_{cid}_{int(start)}_{int(time.time() * 1000) % 100000}.mp4"
+        res = export_mp4(segs, ctx.storage.resolve, out)
+        if not res:
+            raise HTTPException(500, "Export fehlgeschlagen")
+        return FileResponse(res, media_type="video/mp4", filename=name,
+                            background=BackgroundTask(res.unlink, missing_ok=True))
+
     @app.get("/api/cameras/{cid}/export.mp4")
     def export(cid: str, start: float, end: float):
-        rec = ctx.recorders.get(cid)
-        if not rec or end <= start or end - start > 3 * 3600:
-            raise HTTPException(400, "Ungültiger Zeitraum (max. 3 h)")
-        out = rec.export(start, end)
-        if not out:
-            raise HTTPException(404, "Keine Daueraufnahme in diesem Zeitraum")
-        return FileResponse(out, media_type="video/mp4", filename=f"{cid}_{int(start)}.mp4",
-                            background=BackgroundTask(out.unlink, missing_ok=True))
+        t = time.strftime("%Y-%m-%d_%H-%M", time.localtime(start))
+        return _export(cid, start, end, f"{cid}_{t}.mp4")
+
+    @app.get("/api/timeline")
+    def timeline(camera: str, start: float, end: float):
+        segs = db.query("SELECT start_ts, end_ts, event FROM segments WHERE camera=? AND end_ts>? AND start_ts<? "
+                        "ORDER BY start_ts", (camera, start, end))
+        evs = db.query("SELECT id, label, grp, start_ts, end_ts, sub_label, top_score, thumb FROM events "
+                       "WHERE camera=? AND COALESCE(end_ts, ?)>? AND start_ts<? ORDER BY start_ts",
+                       (camera, time.time(), start, end))
+        for e in evs:
+            e["thumb_url"] = f"/media/{e['thumb']}" if e.get("thumb") else None
+        first = db.one("SELECT MIN(start_ts) AS t FROM segments WHERE camera=?", (camera,))
+        return {"ranges": merge_ranges(segs), "events": evs, "first": first["t"] if first else None,
+                "now": time.time(), "pre_roll": ctx.cfg.record.pre_roll}
+
+    @app.get("/api/cameras/{cid}/vod.m3u8")
+    def vod(cid: str, start: float, end: float):
+        segs = query_segments(db, cid, start, min(end, start + 6 * 3600), limit=12000)
+        if not segs:
+            raise HTTPException(404, "Keine Aufnahme in diesem Zeitraum")
+        body = hls_playlist(segs, lambda s: f"/api/segments/{s['id']}.ts")
+        return Response(body, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/segments/{sid}.ts")
+    def segment(sid: int):
+        s = db.one("SELECT root, path FROM segments WHERE id=?", (sid,))
+        if not s:
+            raise HTTPException(404)
+        p = ctx.storage.resolve(s["root"], s["path"])
+        if not p.exists():
+            raise HTTPException(404, "Segment nicht gefunden (Speicherort erreichbar?)")
+        return FileResponse(p, media_type="video/mp2t", headers={"Cache-Control": "public, max-age=86400"})
 
     # ------------------------------------------------------------------ Ereignisse
     def _clip_for(ev: dict) -> dict | None:
         return db.one("SELECT id, start_ts, end_ts, bytes FROM clips WHERE camera=? AND start_ts<=? AND end_ts>=? "
                       "ORDER BY start_ts DESC LIMIT 1", (ev["camera"], ev["start_ts"] + 2, ev["start_ts"]))
 
+    def _event_range(ev: dict) -> tuple[float, float]:
+        rc = ctx.cfg.record
+        return ev["start_ts"] - rc.pre_roll, (ev.get("end_ts") or time.time()) + rc.post_roll
+
     def _event_out(ev: dict) -> dict:
         ev = db.event_out(ev)
-        clip = _clip_for(ev) if ev.get("end_ts") else None
-        ev["clip"] = ({"id": clip["id"], "url": f"/api/clips/{clip['id']}.mp4",
-                       "offset": max(0.0, ev["start_ts"] - clip["start_ts"] - 2)} if clip else None)
+        ev["clip"] = None
+        if ev.get("end_ts"):
+            a, b = _event_range(ev)
+            seg = db.one("SELECT MIN(start_ts) AS s FROM segments WHERE camera=? AND end_ts>? AND start_ts<?",
+                         (ev["camera"], a, b))
+            if seg and seg["s"] is not None:
+                ev["clip"] = {"hls": f"/api/cameras/{ev['camera']}/vod.m3u8?start={a:.1f}&end={b:.1f}",
+                              "url": f"/api/events/{ev['id']}/clip.mp4", "start": seg["s"],
+                              "offset": max(0.0, ev["start_ts"] - seg["s"] - 2)}
+            else:
+                clip = _clip_for(ev)      # MP4-Clips aus älteren Versionen
+                if clip:
+                    ev["clip"] = {"id": clip["id"], "url": f"/api/clips/{clip['id']}.mp4", "hls": None,
+                                  "offset": max(0.0, ev["start_ts"] - clip["start_ts"] - 2)}
         for k in ("snapshot", "thumb", "face_thumb"):
             ev[k + "_url"] = f"/media/{ev[k]}" if ev.get(k) else None
         ev["active"] = ev.get("end_ts") is None
@@ -233,7 +295,22 @@ def create_app(ctx) -> FastAPI:
         for s in db.query("SELECT id, path FROM face_samples WHERE event_id=? AND source IN ('event','unknown')", (eid,)):
             (paths.faces / s["path"]).unlink(missing_ok=True)
             db.execute("DELETE FROM face_samples WHERE id=?", (s["id"],))
-        # Clip löschen, wenn kein anderes Ereignis ihn mehr nutzt
+        # Aufnahme dieses Ereignisses freigeben, wenn kein anderes Ereignis sie braucht
+        if ev.get("end_ts"):
+            a, b = _event_range(ev)
+            rc = ctx.cfg.record
+            others = db.one("SELECT COUNT(*) AS n FROM events WHERE camera=? AND start_ts-?<? AND COALESCE(end_ts,?)+?>?",
+                            (ev["camera"], rc.pre_roll, b, time.time(), rc.post_roll, a))
+            if others and others["n"] == 0:
+                cam = ctx.cfg.cameras.get(ev["camera"])
+                mode = cam.record_mode_effective(rc) if cam else "events"
+                rows = db.query("SELECT id, root, path, bytes FROM segments WHERE camera=? AND end_ts>? AND start_ts<? "
+                                "AND event=1", (ev["camera"], a, b))
+                if mode == "continuous":
+                    for r in rows:
+                        db.execute("UPDATE segments SET event=0 WHERE id=?", (r["id"],))
+                elif ctx.retention:
+                    ctx.retention._delete_segments(rows)
         if ev.get("end_ts"):
             clip = _clip_for(ev)
             if clip:
@@ -245,6 +322,15 @@ def create_app(ctx) -> FastAPI:
                         (paths.media / c["path"]).unlink(missing_ok=True)
                     db.execute("DELETE FROM clips WHERE id=?", (clip["id"],))
         return {"ok": True}
+
+    @app.get("/api/events/{eid}/clip.mp4")
+    def event_clip(eid: str):
+        ev = db.one("SELECT * FROM events WHERE id=?", (eid,))
+        if not ev:
+            raise HTTPException(404)
+        a, b = _event_range(ev)
+        t = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(ev["start_ts"]))
+        return _export(ev["camera"], a, b, f"{ev['camera']}_{t}_{ev['label']}.mp4")
 
     @app.post("/api/events/{eid}/face")
     def correct_face(eid: str, body: FaceAssign):
@@ -424,6 +510,7 @@ def create_app(ctx) -> FastAPI:
                 "models": {"yolo": (paths.models / "yolo.onnx").exists(),
                            "faces": (paths.models / "face_det.onnx").exists()},
                 "go2rtc": ctx.go2rtc.available,
+                "storage": ctx.storage.status(),
             },
         }
 
@@ -514,6 +601,19 @@ def create_app(ctx) -> FastAPI:
         pw = ctx.cfg.mqtt.password if body.password == SECRET else body.password
         ok, msg = test_connection(body.host, body.port, body.username, pw)
         return {"ok": ok, "message": msg}
+
+    @app.post("/api/settings/test-storage")
+    async def test_storage(request: Request):
+        from .config import StorageCfg
+        from .nas import Storage
+        raw = await request.json()
+        if raw.get("password") == SECRET:
+            raw["password"] = ctx.cfg.storage.password
+        try:
+            sc = StorageCfg.model_validate(raw)
+        except Exception as e:
+            raise HTTPException(422, _validation_msg(e))
+        return await asyncio.to_thread(Storage.test, sc)
 
     @app.get("/api/settings/onvif")
     async def onvif(src: str | None = None):

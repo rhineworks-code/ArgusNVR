@@ -160,7 +160,7 @@ async function tabCameras(el) {
         <img loading="lazy" src="/api/cameras/${id}/frame.jpg?w=320" onerror="this.style.visibility='hidden'" alt="">
         <div class="info"><div class="n">${H.esc(c.name)} <span class="pill ${st === 'online' ? 'ok' : st === 'neu' ? '' : 'bad'}">${st}</span></div>
           <div class="m">${H.esc(maskUrl(c.main))}</div>
-          <div class="m">${c.sub ? 'Substream ✓ · ' : ''}${c.detect.fps} fps · ${Object.keys(c.zones || {}).length} Zonen · ${c.faces ? 'Gesichter · ' : ''}${c.record ? 'Aufnahme' : 'keine Aufnahme'}${c.detect.enabled ? '' : ' · Erkennung aus'}</div></div>
+          <div class="m">${c.sub ? 'Substream ✓ · ' : ''}${c.detect.fps} fps · ${Object.keys(c.zones || {}).length} Zonen · ${c.faces ? 'Gesichter · ' : ''}${{ events: 'Ereignis-Aufnahme', continuous: 'Daueraufnahme', off: 'keine Aufnahme' }[!c.record ? 'off' : (c.record_mode && c.record_mode !== 'default' ? c.record_mode : S.cfg.record.mode)]}${c.detect.enabled ? '' : ' · Erkennung aus'}</div></div>
         <button class="btn small">Bearbeiten</button></div>`;
     }).join('')}</div>`;
   H.$('#cam-add', el).onclick = () => openCameraEditor(null);
@@ -170,7 +170,8 @@ async function tabCameras(el) {
 
 function newCamera(name = '') {
   return { name, main: '', sub: null, detect: { stream: 'sub', width: null, height: null, fps: 5, enabled: true },
-    hwaccel: 'cuda', faces: true, record: true, objects: null, zones: {}, require_zone: false, masks: [],
+    hwaccel: 'cuda', faces: true, record: true, record_mode: 'default', events_days: null, continuous_days: null,
+    live_transcode: 'auto', objects: null, zones: {}, require_zone: false, masks: [],
     motion: { threshold: 25, min_area: 0.002 } };
 }
 
@@ -218,7 +219,12 @@ export function openCameraEditor(id, preset = null) {
         ${row('Nur Ereignisse in Zonen', toggle('require_zone', 'cam'), 'Objekte außerhalb aller Zonen lösen nichts aus')}
       </section>
       <section><h3>Aufnahme</h3>
-        ${row('Ereignisse aufnehmen', toggle('record', 'cam'))}
+        ${row('Aufnahmemodus', seg('record_mode', [['default', `Global (${{ events: 'Ereignisse', continuous: 'Dauer', off: 'aus' }[S.cfg.record.mode]})`], ['events', 'Nur Ereignisse'], ['continuous', 'Daueraufnahme'], ['off', 'Aus']], 'cam'))}
+        ${row('Ereignisse behalten', `${num('events_days', 1, 3650, 1, 'cam')} <span class="muted">Tage – leer = global (${S.cfg.record.retention.events_days})</span>`)}
+        ${row('Daueraufnahme behalten', `${num('continuous_days', 1, 3650, 1, 'cam')} <span class="muted">Tage – leer = global (${S.cfg.record.retention.continuous_days})</span>`)}
+      </section>
+      <section><h3>Live-Bild</h3>
+        ${row('H.265 für den Browser umwandeln', seg('live_transcode', [['auto', 'Automatisch'], ['on', 'Immer'], ['off', 'Nie']], 'cam'), 'Viele Browser zeigen H.265 nicht an – Argus wandelt dann auf der GPU in H.264 um (nur solange jemand zuschaut)')}
       </section>
       <div class="m-foot"><span class="spacer"></span><button class="btn" data-close>Abbrechen</button><button class="btn primary" id="c-save">Speichern</button></div>
     </div>`, true);
@@ -291,6 +297,9 @@ export function openCameraEditor(id, preset = null) {
     if (!/^[a-z0-9_]+$/.test(cid)) return H.toast('Ungültige ID');
     if (isNew && S.cfg.cameras[cid]) return H.toast('Diese ID gibt es schon');
     if (!cam.sub && cam.detect.stream === 'sub') cam.detect.stream = 'main';
+    cam.record = true;
+    if (!cam.events_days) cam.events_days = null;
+    if (!cam.continuous_days) cam.continuous_days = null;
     const backup = clone(S.cfg.cameras);
     S.cfg.cameras[cid] = cam;
     if (await save(isNew ? 'Kamera hinzugefügt' : 'Kamera gespeichert')) { H.closeModal(); renderTab(); }
@@ -500,25 +509,61 @@ function tabFaces(el) {
 
 // ---------------------------------------------------------------- Aufnahme
 function tabRecord(el) {
+  const st = S.meta.storage || {};
   el.innerHTML = `
     <div class="card form"><h3>Aufnahme</h3>
-      ${row('Modus', seg('record.mode', [['events', 'Nur Ereignisse'], ['continuous', 'Daueraufnahme'], ['off', 'Aus']]), '„Nur Ereignisse“ spart am meisten Speicher')}
+      ${row('Modus (Standard für alle Kameras)', seg('record.mode', [['events', 'Nur Ereignisse'], ['continuous', 'Daueraufnahme'], ['off', 'Aus']]), 'pro Kamera abweichend einstellbar. „Nur Ereignisse“ spart am meisten Speicher')}
       ${row('Qualität', seg('record.source', [['main', 'Hauptstream (voll)'], ['sub', 'Substream (klein)']]), 'Substream ≈ 1/10 der Größe')}
       ${row('Ton aufnehmen', toggle('record.audio'))}
-      ${row('Vorlauf', range('record.pre_roll', 0, 20, 1, 's'), 'aus dem RAM-Puffer – kostet keinen Plattenplatz')}
-      ${row('Nachlauf', range('record.post_roll', 0, 60, 1, 's'))}
-      ${row('Max. Clip-Länge', range('record.max_clip_length', 60, 1800, 30, 's'))}
+      ${row('Vorlauf', range('record.pre_roll', 0, 30, 1, 's'), 'aus dem RAM-Puffer – kostet keinen Plattenplatz')}
+      ${row('Nachlauf', range('record.post_roll', 0, 120, 1, 's'))}
     </div>
-    <div class="card form"><h3>Aufbewahrung</h3>
-      ${row('Ereignisse behalten', `${num('record.retention.events_days', 1, 365)} <span class="muted">Tage</span>`)}
-      ${row('Daueraufnahme behalten', `${num('record.retention.continuous_days', 1, 90)} <span class="muted">Tage</span>`)}
-      ${row('Speicher-Obergrenze', `${num('record.retention.max_storage_gb', 1, 100000, 1)} <span class="muted">GB</span>`, 'älteste Aufnahmen werden zuerst gelöscht')}
+    <div class="card form"><h3>Speicherdauer</h3>
+      <p class="muted" style="margin-top:0">Bei Daueraufnahme bleiben Abschnitte mit Ereignissen so lange wie Ereignisse, der Rest wird früher gelöscht. Pro Kamera abweichend einstellbar.</p>
+      ${row('Ereignisse behalten', `${num('record.retention.events_days', 1, 3650)} <span class="muted">Tage</span>`, 'Aufnahmen + Snapshots von Ereignissen')}
+      ${row('Daueraufnahme behalten', `${num('record.retention.continuous_days', 1, 3650)} <span class="muted">Tage</span>`, 'Aufnahmen ohne Ereignis')}
+      ${row('Speicher-Obergrenze', `${num('record.retention.max_storage_gb', 1, 100000, 1)} <span class="muted">GB</span>`, 'wird sie erreicht, werden die ältesten Aufnahmen zuerst gelöscht')}
+    </div>
+    <div class="card form"><h3>Speicherort der Aufnahmen</h3>
+      <div class="storage-status ${st.type === 'local' ? '' : st.ok ? 'ok' : 'bad'}">
+        ${st.type === 'local' ? 'Aufnahmen liegen auf der lokalen Platte des Servers.'
+          : st.ok ? `✓ Verbunden – Aufnahmen gehen auf <b>${H.esc(st.target)}</b>${st.usage ? ` · frei: ${(st.usage.free / 1e9).toFixed(0)} GB von ${(st.usage.total / 1e9).toFixed(0)} GB` : ''}`
+          : `✕ ${H.esc(st.error || 'nicht verbunden')} – es wird vorübergehend lokal gespeichert`}</div>
+      ${row('Ziel', seg('storage.type', [['local', 'Lokal'], ['smb', 'Netzwerkfestplatte (SMB)'], ['nfs', 'NFS'], ['path', 'Ordner']]))}
+      <div id="st-fields"></div>
+      <p class="muted" style="margin-bottom:0">Datenbank, Snapshots und Gesichter bleiben lokal (schnell und ausfallsicher). Ist das NAS kurz weg, speichert Argus lokal weiter und verbindet sich automatisch neu.</p>
     </div>
     <div class="card form"><h3>Snapshots</h3>
       ${row('JPEG-Qualität', range('snapshots.quality', 40, 95, 5, 'v'))}
       ${row('Max. Breite', range('snapshots.max_width', 640, 3840, 64, 'px'))}
     </div>`;
-  bind(el, { cfg: S.cfg }, onChange);
+  const fields = () => {
+    const t = S.cfg.storage.type, box = H.$('#st-fields', el);
+    if (t === 'local') { box.innerHTML = ''; return; }
+    box.innerHTML = (t === 'smb' ? `
+      ${row('NAS-Adresse', text('storage.server', '192.168.1.5'))}
+      ${row('Freigabe', text('storage.share', 'z. B. surveillance oder video/argus'), 'Synology: Name des freigegebenen Ordners')}
+      ${row('Benutzer', text('storage.username', 'NAS-Benutzer'))}
+      ${row('Passwort', text('storage.password', '', 'password'))}
+      ${row('SMB-Version', seg('storage.smb_version', [['3.0', '3.0'], ['2.1', '2.1'], ['2.0', '2.0'], ['1.0', '1.0 (alt)']]), 'Synology/QNAP/Windows: 3.0, FRITZ!Box: 3.0 oder 2.0')}`
+      : t === 'nfs' ? `
+      ${row('NAS-Adresse', text('storage.server', '192.168.1.5'))}
+      ${row('Export-Pfad', text('storage.share', '/volume1/surveillance'), 'auf dem NAS die IP des Servers für NFS freigeben')}`
+      : `${row('Ordner im Container', text('storage.path', '/nas'), 'auf dem Host eingebunden und in docker-compose.yml als Volume angegeben (z. B. /mnt/nas:/nas)')}`) + `
+      ${row('Unterordner', text('storage.subfolder', 'argus'))}
+      ${t !== 'path' ? row('Weitere Mount-Optionen', text('storage.options', 'optional, z. B. seal'), 'für Fortgeschrittene') : ''}
+      ${row('', '<button class="btn small" id="st-test">Verbindung testen</button> <span id="st-res"></span>')}`;
+    bind(box, { cfg: S.cfg }, onChange);
+    H.$('#st-test', box).onclick = async () => {
+      const out = H.$('#st-res', box); out.innerHTML = '<span class="muted">teste … (bis zu 30 s)</span>';
+      try {
+        const r = await H.api('/api/settings/test-storage', { method: 'POST', json: S.cfg.storage });
+        out.innerHTML = `<span class="${r.ok ? 'good' : 'bad'}">${r.ok ? '✓' : '✕'} ${H.esc(r.message)}${r.usage ? ` · ${(r.usage.free / 1e9).toFixed(0)} GB frei` : ''}</span>`;
+      } catch (e) { out.innerHTML = `<span class="bad">✕ ${H.esc(e.message)}</span>`; }
+    };
+  };
+  bind(el, { cfg: S.cfg }, (p) => { onChange(); if (p === 'storage.type') fields(); });
+  fields();
 }
 
 // ---------------------------------------------------------------- Home Assistant / MQTT

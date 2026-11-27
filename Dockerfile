@@ -35,7 +35,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # ffmpeg mit NVDEC/CUDA (BtbN-Build) + go2rtc
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl xz-utils tzdata libgl1 libglib2.0-0 \
+        ca-certificates curl xz-utils tzdata libgl1 libglib2.0-0 cifs-utils nfs-common \
  && curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
       | tar -xJ -C /tmp \
  && mv /tmp/ffmpeg-*/bin/ffmpeg /tmp/ffmpeg-*/bin/ffprobe /usr/local/bin/ && rm -rf /tmp/ffmpeg-* \
