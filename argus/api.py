@@ -59,9 +59,20 @@ class PersonIn(BaseModel):
     name: str
 
 
+class StreamTest(BaseModel):
+    url: str
+
+
+class MqttTest(BaseModel):
+    host: str
+    port: int = 1883
+    username: str = ""
+    password: str = ""
+
+
 def create_app(ctx) -> FastAPI:
     app = FastAPI(title="Argus NVR", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
-    cfg, paths, db = ctx.cfg, ctx.paths, ctx.db
+    paths, db = ctx.paths, ctx.db
     secret = secrets.token_bytes(32)
     http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
     gpu_cache: dict[str, Any] = {"ts": 0, "data": None}
@@ -71,7 +82,7 @@ def create_app(ctx) -> FastAPI:
         return hmac.new(secret, user.encode(), hashlib.sha256).hexdigest()
 
     def _authorized(headers, cookies) -> bool:
-        a = cfg.auth
+        a = ctx.cfg.auth
         if not a.username:
             return True
         if hmac.compare_digest(cookies.get("argus_session", ""), _token(a.username)):
@@ -89,8 +100,8 @@ def create_app(ctx) -> FastAPI:
     async def auth_mw(request: Request, call_next):
         if request.url.path == "/api/health" or _authorized(request.headers, request.cookies):
             resp = await call_next(request)
-            if cfg.auth.username and "argus_session" not in request.cookies:
-                resp.set_cookie("argus_session", _token(cfg.auth.username), httponly=True, samesite="lax",
+            if ctx.cfg.auth.username and "argus_session" not in request.cookies:
+                resp.set_cookie("argus_session", _token(ctx.cfg.auth.username), httponly=True, samesite="lax",
                                 max_age=30 * 86400)
             return resp
         return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Argus"'})
@@ -105,23 +116,23 @@ def create_app(ctx) -> FastAPI:
         return {"ok": True, "version": __version__}
 
     def _cam_info(cid: str) -> dict:
-        cam = cfg.cameras[cid]
+        cam = ctx.cfg.cameras[cid]
         w = ctx.workers.get(cid)
         return {"id": cid, "name": cam.name, "has_sub": bool(cam.sub), "faces": cam.faces and bool(ctx.faces),
-                "record": cam.record and cfg.record.mode != "off",
+                "record": cam.record and ctx.cfg.record.mode != "off",
                 "zones": {n: z.points for n, z in cam.zones.items()},
                 "live_stream": f"{cid}_sub" if cam.sub else cid, "main_stream": cid,
                 "stats": w.stats() if w else None, "counts": ctx.events.counts.get(cid, {})}
 
     @app.get("/api/config")
     def config():
-        return {"version": __version__, "cameras": [_cam_info(c) for c in cfg.cameras],
-                "record": cfg.record.model_dump(), "faces": cfg.faces.model_dump(), "faces_active": bool(ctx.faces),
-                "objects": cfg.objects.track, "mqtt": {"enabled": cfg.mqtt.enabled, "prefix": cfg.mqtt.topic_prefix}}
+        return {"version": __version__, "cameras": [_cam_info(c) for c in ctx.cfg.cameras],
+                "record": ctx.cfg.record.model_dump(), "faces": ctx.cfg.faces.model_dump(), "faces_active": bool(ctx.faces),
+                "objects": ctx.cfg.objects.track, "mqtt": {"enabled": ctx.cfg.mqtt.enabled, "prefix": ctx.cfg.mqtt.topic_prefix}}
 
     @app.get("/api/cameras")
     def cameras():
-        return [_cam_info(c) for c in cfg.cameras]
+        return [_cam_info(c) for c in ctx.cfg.cameras]
 
     @app.get("/api/cameras/{cid}/latest.jpg")
     def latest(cid: str, boxes: int = 1, w: int = 960):
@@ -339,7 +350,7 @@ def create_app(ctx) -> FastAPI:
                 import numpy as np
                 cen = db.one("SELECT centroid FROM face_clusters WHERE id=?", (c["id"],))
                 m = ctx.faces.match(np.frombuffer(cen["centroid"], np.float32))
-                if m and m[0][1] >= cfg.faces.recognition_threshold * 0.75:
+                if m and m[0][1] >= ctx.cfg.faces.recognition_threshold * 0.75:
                     suggestion = {"person_id": m[0][0], "name": ctx.faces.names.get(m[0][0]), "score": round(m[0][1], 2)}
             out.append({**c, "samples": s, "suggestion": suggestion})
         return out
@@ -386,6 +397,146 @@ def create_app(ctx) -> FastAPI:
     async def storage_cleanup():
         await asyncio.to_thread(ctx.retention.cleanup)
         return ctx.retention.usage
+
+    # ------------------------------------------------------------------ Einstellungen
+    from .config import COCO, GROUPS, SECRET, Config, dump_config, merge_secrets, public_config
+
+    def _validation_msg(e: Exception) -> str:
+        errs = getattr(e, "errors", None)
+        if callable(errs):
+            out = []
+            for er in errs()[:6]:
+                loc = ".".join(str(x) for x in er.get("loc", ()))
+                out.append(f"{loc}: {er.get('msg')}")
+            return "; ".join(out)
+        return str(e)
+
+    @app.get("/api/settings")
+    def get_settings():
+        from .runtime import available_providers
+        return {
+            "config": public_config(ctx.cfg),
+            "meta": {
+                "labels": [l for l in COCO if l in GROUPS], "groups": GROUPS,
+                "providers": available_providers(),
+                "first_run": not paths.config.exists() or not ctx.cfg.cameras,
+                "config_path": str(paths.config),
+                "models": {"yolo": (paths.models / "yolo.onnx").exists(),
+                           "faces": (paths.models / "face_det.onnx").exists()},
+                "go2rtc": ctx.go2rtc.available,
+            },
+        }
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request):
+        raw = await request.json()
+        raw = merge_secrets(raw, ctx.cfg)
+        try:
+            new = Config.model_validate(raw)
+        except Exception as e:
+            raise HTTPException(422, _validation_msg(e))
+        result = await asyncio.to_thread(ctx.apply_config, new)
+        return {"ok": True, **result, "config": public_config(ctx.cfg)}
+
+    @app.get("/api/settings/export")
+    def export_settings():
+        import yaml
+        data = yaml.safe_dump(dump_config(ctx.cfg), sort_keys=False, allow_unicode=True)
+        return Response(data, media_type="application/x-yaml",
+                        headers={"Content-Disposition": 'attachment; filename="argus-config.yml"'})
+
+    @app.post("/api/settings/import")
+    async def import_settings(file: UploadFile = File(...)):
+        import yaml
+        try:
+            new = Config.model_validate(yaml.safe_load(await file.read()) or {})
+        except Exception as e:
+            raise HTTPException(422, _validation_msg(e))
+        result = await asyncio.to_thread(ctx.apply_config, new)
+        return {"ok": True, **result}
+
+    @app.post("/api/settings/test-stream")
+    def test_stream(body: StreamTest):
+        import uuid as _uuid
+        url = body.url.strip()
+        if not url:
+            raise HTTPException(400, "Keine Adresse angegeben")
+        name = f"__argus_test_{_uuid.uuid4().hex[:6]}"
+        via = url
+        used = False
+        if ctx.go2rtc.available and ctx.go2rtc.proc and ctx.go2rtc.proc.poll() is None:
+            used = ctx.go2rtc.put_stream(name, url)
+            if used:
+                via = f"rtsp://127.0.0.1:8554/{name}"
+        rtsp = ["-rtsp_transport", "tcp", "-timeout", "10000000"] if via.startswith("rtsp") else []
+        try:
+            pr = subprocess.run(["ffprobe", "-v", "error", *rtsp, "-show_entries",
+                                 "stream=codec_type,codec_name,width,height,avg_frame_rate", "-of", "json", via],
+                                capture_output=True, text=True, timeout=25)
+            if pr.returncode != 0:
+                err = (pr.stderr or "").strip().splitlines()
+                msg = err[-1] if err else "Stream nicht erreichbar"
+                if "401" in msg or "Unauthorized" in msg:
+                    msg = "Zugangsdaten falsch (401 Unauthorized)"
+                elif "404" in msg or "Not Found" in msg:
+                    msg = "Pfad nicht gefunden (404) – Stream-Adresse prüfen"
+                elif "timed out" in msg.lower() or "Connection refused" in msg:
+                    msg = "Kamera nicht erreichbar – IP/Port prüfen"
+                return {"ok": False, "error": msg}
+            streams = json.loads(pr.stdout or "{}").get("streams", [])
+            v = next((x for x in streams if x.get("codec_type") == "video"), None)
+            a = next((x for x in streams if x.get("codec_type") == "audio"), None)
+            if not v:
+                return {"ok": False, "error": "Kein Videostream gefunden"}
+            fps = None
+            try:
+                n, d = (v.get("avg_frame_rate") or "0/1").split("/")
+                fps = round(int(n) / int(d), 1) if int(d) else None
+            except Exception:
+                pass
+            img = None
+            sn = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *rtsp, "-i", via, "-frames:v", "1",
+                                 "-vf", "scale=960:-2", "-f", "image2", "-c:v", "mjpeg", "-q:v", "5", "pipe:1"],
+                                capture_output=True, timeout=25)
+            if sn.returncode == 0 and sn.stdout:
+                img = "data:image/jpeg;base64," + base64.b64encode(sn.stdout).decode()
+            return {"ok": True, "codec": v.get("codec_name"), "width": v.get("width"), "height": v.get("height"),
+                    "fps": fps, "audio": a.get("codec_name") if a else None, "image": img}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Zeitüberschreitung – Kamera antwortet nicht"}
+        finally:
+            if used:
+                ctx.go2rtc.delete_stream(name)
+
+    @app.post("/api/settings/test-mqtt")
+    def test_mqtt(body: MqttTest):
+        from .mqtt import test_connection
+        pw = ctx.cfg.mqtt.password if body.password == SECRET else body.password
+        ok, msg = test_connection(body.host, body.port, body.username, pw)
+        return {"ok": ok, "message": msg}
+
+    @app.get("/api/settings/onvif")
+    async def onvif(src: str | None = None):
+        try:
+            r = await http.get(f"http://{GO2RTC}/go2rtc/api/onvif", params={"src": src} if src else None, timeout=20)
+        except httpx.HTTPError:
+            raise HTTPException(502, "go2rtc nicht erreichbar")
+        if r.status_code == 404:
+            return {"sources": []}
+        if r.status_code >= 400:
+            raise HTTPException(400, r.text.strip() or "ONVIF-Abfrage fehlgeschlagen")
+        return r.json()
+
+    @app.get("/api/cameras/{cid}/frame.jpg")
+    def raw_frame(cid: str, w: int = 1280):
+        """Unbearbeitetes Bild (für den Zonen-Editor)."""
+        wk = ctx.workers.get(cid)
+        if not wk:
+            raise HTTPException(404)
+        data = wk.latest_jpeg(annotate=False, max_w=max(160, min(w, 1920)), quality=80)
+        if data is None:
+            raise HTTPException(503, "Noch kein Bild")
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     # ------------------------------------------------------------------ WebSocket Push
     @app.websocket("/api/ws")

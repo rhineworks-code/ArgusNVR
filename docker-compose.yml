@@ -9,6 +9,9 @@ services:
     container_name: argus
     restart: unless-stopped
     shm_size: 256mb
+    # Für die ONVIF-Kamerasuche in den Einstellungen: Host-Netzwerk verwenden
+    # (dann den "ports:"-Block unten entfernen)
+    # network_mode: host
     environment:
       - TZ=Europe/Berlin
     ports:

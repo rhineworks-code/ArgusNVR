@@ -23,6 +23,11 @@ from .storage import Retention
 log = logging.getLogger("argus")
 
 
+def dump_cams(cfg) -> str:
+    import json
+    return json.dumps({k: v.model_dump(mode="json") for k, v in cfg.cameras.items()}, sort_keys=True)
+
+
 class Context:
     def __init__(self) -> None:
         self.started = time.time()
@@ -39,6 +44,7 @@ class Context:
         self.workers: dict[str, CameraWorker] = {}
         self.events: EventManager | None = None
         self.retention: Retention | None = None
+        self._apply_lock = threading.Lock()
 
     # ------------------------------------------------------------------ Aufbau
     def build(self) -> None:
@@ -47,41 +53,19 @@ class Context:
                  ", ".join(available_providers()))
         self.go2rtc.start()
 
-        model = cfg.detector.model or str(paths.models / "yolo.onnx")
-        if os.path.exists(model):
-            from .detector import Detector
-            self.detector = Detector(model, cfg.detector.device, cfg.detector.gpu_id, cfg.detector.nms_iou,
-                                     cache_dir=str(paths.config.parent / "trt-cache"))
-            log.info("Objekterkennung: %s auf %s (%.1f ms Warm-up)", os.path.basename(model),
-                     self.detector.provider, self.detector.infer_ms)
-        else:
-            log.error("Kein YOLO-Modell unter %s – Objekterkennung deaktiviert", model)
+        self.detector = self._load_detector(cfg)
 
-        if cfg.faces.enabled and (paths.models / "face_det.onnx").exists() and (paths.models / "face_rec.onnx").exists():
-            from .faces import FaceEngine
-            try:
-                self.faces = FaceEngine(cfg.faces, paths, self.db, cfg.detector.device, cfg.detector.gpu_id)
-                log.info("Gesichtserkennung aktiv (%d Personen bekannt)", len(self.faces.names))
-            except Exception:
-                log.exception("Gesichtserkennung konnte nicht geladen werden")
-
-        if cfg.mqtt.enabled:
-            from .mqtt import Mqtt
-            self.mqtt = Mqtt(cfg, self.set_detect)
-            self.mqtt.start()
-
-        if cfg.record.mode != "off":
-            for cid, cam in cfg.cameras.items():
-                if cam.record:
-                    self.recorders[cid] = CameraRecorder(cfg, cam, paths, self.db,
-                                                         on_clip=lambda c: self.hub.publish({"type": "clip", "clip": c}))
+        self._load_faces(cfg)
+        self._start_mqtt(cfg)
 
         self.events = EventManager(cfg, paths, self.db, self.hub, self.mqtt, self.faces, self.recorders)
         # offene Ereignisse vom letzten Lauf abschließen
         self.db.execute("UPDATE events SET end_ts=start_ts+1 WHERE end_ts IS NULL")
 
         for cid, cam in cfg.cameras.items():
-            self.workers[cid] = CameraWorker(cfg, cam, self.detector, self.events, self.faces, cfg.detector.gpu_id)
+            self._make_camera(cid, cam, start=False)
+        if not cfg.cameras:
+            log.warning("Noch keine Kamera eingerichtet – http://<server>:5080/#/settings")
 
         self.retention = Retention(cfg, paths, self.db, self.faces)
         self.retention.measure()
@@ -90,7 +74,7 @@ class Context:
         time.sleep(1.5)   # go2rtc hochfahren lassen
         for r in self.recorders.values():
             r.start()
-        RecordingJanitor(list(self.recorders.values())).start()
+        RecordingJanitor(self.recorders).start()
         for w in self.workers.values():
             w.start()
         self.retention.start()
@@ -107,6 +91,147 @@ class Context:
         if self.mqtt:
             self.mqtt.stop()
         self.go2rtc.stop()
+
+
+    # ------------------------------------------------------------------ Bausteine
+    def _load_detector(self, cfg):
+        model = cfg.detector.model or str(self.paths.models / "yolo.onnx")
+        if not os.path.exists(model):
+            log.error("Kein YOLO-Modell unter %s – Objekterkennung deaktiviert", model)
+            return None
+        from .detector import Detector
+        d = Detector(model, cfg.detector.device, cfg.detector.gpu_id, cfg.detector.nms_iou,
+                     cache_dir=str(self.paths.config.parent / "trt-cache"))
+        log.info("Objekterkennung: %s auf %s (%.1f ms Warm-up)", os.path.basename(model), d.provider, d.infer_ms)
+        return d
+
+    def _load_faces(self, cfg) -> None:
+        m = self.paths.models
+        if not (cfg.faces.enabled and (m / "face_det.onnx").exists() and (m / "face_rec.onnx").exists()):
+            self.faces = None
+            return
+        from .faces import FaceEngine
+        try:
+            self.faces = FaceEngine(cfg.faces, self.paths, self.db, cfg.detector.device, cfg.detector.gpu_id)
+            log.info("Gesichtserkennung aktiv (%d Personen bekannt)", len(self.faces.names))
+        except Exception:
+            log.exception("Gesichtserkennung konnte nicht geladen werden")
+            self.faces = None
+
+    def _start_mqtt(self, cfg) -> None:
+        self.mqtt = None
+        if cfg.mqtt.enabled and cfg.mqtt.host:
+            from .mqtt import Mqtt
+            self.mqtt = Mqtt(cfg, self.set_detect)
+            self.mqtt.start()
+
+    def _make_camera(self, cid, cam, start: bool = True) -> None:
+        cfg = self.cfg
+        if cfg.record.mode != "off" and cam.record:
+            rec = CameraRecorder(cfg, cam, self.paths, self.db,
+                                 on_clip=lambda c: self.hub.publish({"type": "clip", "clip": c}))
+            self.recorders[cid] = rec
+            if start:
+                rec.start()
+        w = CameraWorker(cfg, cam, self.detector, self.events, self.faces, cfg.detector.gpu_id)
+        self.workers[cid] = w
+        if start:
+            w.start()
+
+    def _drop_camera(self, cid) -> None:
+        w = self.workers.pop(cid, None)
+        if w:
+            w.stop()
+        if self.events:
+            self.events.end_camera(cid)
+        r = self.recorders.pop(cid, None)
+        if r:
+            r.stop()
+
+    # ------------------------------------------------------------------ Einstellungen live übernehmen
+    def apply_config(self, new) -> dict:
+        """Übernimmt eine neue Konfiguration ohne Container-Neustart. Nur Betroffenes wird neu gestartet."""
+        import json
+        from .config import save_config
+        from .go2rtc import build_config
+        with self._apply_lock:
+            old = self.cfg
+            dump = lambda m: json.dumps(m.model_dump(mode="json"), sort_keys=True)  # noqa: E731
+            changed: list[str] = []
+            save_config(self.paths.config, new)
+            self.cfg = new
+
+            # go2rtc
+            g_old, g_new = build_config(old), build_config(new)
+            if {k: v for k, v in g_old.items() if k != "streams"} != {k: v for k, v in g_new.items() if k != "streams"}:
+                self.go2rtc.restart(new)
+                changed.append("go2rtc")
+            elif g_old["streams"] != g_new["streams"]:
+                self.go2rtc.write(new)
+                self.go2rtc.update_streams(g_old["streams"], g_new["streams"])
+                changed.append("Streams")
+
+            # Objekterkennung
+            if dump(old.detector) != dump(new.detector):
+                det = self._load_detector(new)
+                self.detector = det
+                changed.append("Objekterkennung")
+
+            # Gesichter
+            if old.faces.enabled != new.faces.enabled or old.detector.device != new.detector.device:
+                self._load_faces(new)
+                changed.append("Gesichtserkennung")
+            elif self.faces:
+                self.faces.cfg = new.faces
+            # MQTT
+            removed = set(old.cameras) - set(new.cameras)
+            if self.mqtt and removed:
+                for cid in removed:
+                    self.mqtt.remove_camera(cid, old.cameras[cid])
+            if dump(old.mqtt) != dump(new.mqtt):
+                if self.mqtt:
+                    self.mqtt.stop()
+                self._start_mqtt(new)
+                changed.append("MQTT")
+            elif self.mqtt:
+                self.mqtt.cfg = new
+                if dump_cams(old) != dump_cams(new) or old.faces.enabled != new.faces.enabled:
+                    self.mqtt._discovery()
+
+            # Ereignis-Verwaltung & Aufräumen
+            self.events.cfg = new
+            self.events.mqtt = self.mqtt
+            self.events.faces = self.faces
+            if self.retention:
+                self.retention.cfg = new
+                self.retention.faces = self.faces
+
+            # Kameras: nur geänderte neu starten
+            global_changed = (dump(old.objects) != dump(new.objects) or dump(old.record) != dump(new.record)
+                              or old.detector.min_score != new.detector.min_score)
+            for cid in removed:
+                self._drop_camera(cid)
+                changed.append(f"Kamera {cid} entfernt")
+            for cid, cam in new.cameras.items():
+                o = old.cameras.get(cid)
+                if o is None or global_changed or dump(o) != dump(cam):
+                    self._drop_camera(cid)
+                    self._make_camera(cid, cam)
+                    changed.append(f"Kamera {cam.name}")
+                else:
+                    w = self.workers.get(cid)
+                    if w:
+                        w.cfg, w.cam = new, cam
+                        w.detector, w.faces = self.detector, self.faces
+                    r = self.recorders.get(cid)
+                    if r:
+                        r.cfg, r.cam, r.rc = new, cam, new.record
+            # Schwellwerte für Gesichter / Detektor in laufenden Workern aktualisieren
+            for w in self.workers.values():
+                w.detector, w.faces = self.detector, self.faces
+            log.info("Einstellungen übernommen: %s", ", ".join(changed) or "keine laufenden Dienste betroffen")
+            self.hub.publish({"type": "config", "changed": changed})
+            return {"changed": changed}
 
     # ------------------------------------------------------------------ Laufzeit
     def set_detect(self, cid: str, on: bool) -> None:

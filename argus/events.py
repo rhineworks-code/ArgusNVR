@@ -181,7 +181,8 @@ class EventManager:
     def _publish_counts(self, cam: str, tracks: list[Track]) -> None:
         conf = [t for t in tracks if t.confirmed]
         counts = {g: sum(1 for t in conf if t.group == g) for g in GROUP_NAMES}
-        for zname in self.cfg.cameras[cam].zones:
+        cam_cfg = self.cfg.cameras.get(cam)
+        for zname in (cam_cfg.zones if cam_cfg else {}):
             for g in GROUP_NAMES:
                 counts[f"{zname}/{g}"] = sum(1 for t in conf if t.group == g and zname in t.current_zones)
         prev = self.counts.get(cam)
@@ -190,6 +191,12 @@ class EventManager:
             self.hub.publish({"type": "counts", "camera": cam, "counts": counts})
             if self.mqtt:
                 self.mqtt.counts(cam, counts, prev or {})
+
+    def end_camera(self, cam: str) -> None:
+        with self.lock:
+            for ev in [e for e in self.active.values() if e.camera == cam]:
+                self._end(ev, time.time())
+        self.counts.pop(cam, None)
 
     def end_all(self) -> None:
         with self.lock:
