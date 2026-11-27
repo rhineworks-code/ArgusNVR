@@ -1,7 +1,7 @@
 """Speicherort für Aufnahmen: lokal, Netzwerkfestplatte (SMB/NFS) oder ein eingebundener Ordner.
 
 Die Freigabe wird im Container eingebunden (braucht cap_add: SYS_ADMIN, siehe docker-compose.yml).
-Fällt das NAS aus, schreibt Argus automatisch lokal weiter und bindet es im Hintergrund neu ein.
+Fällt das NAS aus, schreibt CamSpire automatisch lokal weiter und bindet es im Hintergrund neu ein.
 """
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from pathlib import Path
 
 from .config import Paths, StorageCfg
 
-log = logging.getLogger("argus.storage")
+log = logging.getLogger("camspire.storage")
 
-MOUNT = Path("/mnt/argus-nas")
-CRED = Path("/run/argus-smb.cred")
+MOUNT = Path("/mnt/camspire-nas")
+CRED = Path("/run/camspire-smb.cred")
 
 
 def _mount_cmd(sc: StorageCfg, target: Path, cred: Path) -> list[str]:
@@ -65,8 +65,8 @@ def _explain(err: str) -> str:
 
 
 def _writable(root: Path, timeout: int = 10) -> tuple[bool, str]:
-    """Schreibtest mit Zeitlimit (ein hängendes NAS darf Argus nicht blockieren)."""
-    probe = root / ".argus-probe"
+    """Schreibtest mit Zeitlimit (ein hängendes NAS darf CamSpire nicht blockieren)."""
+    probe = root / ".camspire-probe"
     try:
         r = subprocess.run(["timeout", str(timeout), "sh", "-c",
                             f'mkdir -p "{root}" && echo ok > "{probe}" && cat "{probe}" && rm -f "{probe}"'],
@@ -230,8 +230,8 @@ class Storage:
             return {"ok": ok, "message": "Ordner beschreibbar" if ok else msg, "usage": u}
         if not sc.server or not sc.share:
             return {"ok": False, "message": "Server und Freigabe eintragen"}
-        tmp = Path(tempfile.mkdtemp(prefix="argus-nas-test-"))
-        cred = Path(tempfile.mktemp(prefix="argus-cred-"))
+        tmp = Path(tempfile.mkdtemp(prefix="camspire-nas-test-"))
+        cred = Path(tempfile.mktemp(prefix="camspire-cred-"))
         try:
             try:
                 r = subprocess.run(_mount_cmd(sc, tmp, cred), capture_output=True, text=True, timeout=30)

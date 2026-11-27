@@ -1,4 +1,4 @@
-# Argus NVR
+# CamSpire NVR
 
 Selbst gehosteter Netzwerk-Videorekorder in **einem** Docker-Container – mit KI-Erkennung auf der NVIDIA-GPU,
 lernender Gesichtserkennung und Home-Assistant-Anbindung über MQTT.
@@ -12,6 +12,13 @@ lernender Gesichtserkennung und Home-Assistant-Anbindung über MQTT.
 | **Speicher** | Aufnahme nur bei Ereignissen, ohne Neukodierung, Vorlauf aus dem RAM, harte GB-Obergrenze |
 | **Live** | WebRTC / MSE im Browser, Restream per RTSP für Home Assistant |
 | **HA** | MQTT-Discovery: Sensoren, Belegung pro Zone, Snapshots, erkannte Person, Erkennung an/aus |
+
+## Umstieg von „Argus NVR“
+
+CamSpire hieß vorher Argus. Beim ersten Start übernimmt CamSpire alles automatisch:
+Datenbank (`argus.db` → `camspire.db`), Einstellungen, Aufnahmen, Gesichter. Das MQTT-Präfix wechselt von
+`argus` auf `camspire`, die alten `argus_*`-Entitäten werden aus Home Assistant entfernt und als `camspire_*` neu angelegt.
+Alte `.env`-Einträge (`ARGUS_RTSP_PORT` …) funktionieren weiter.
 
 ## Warum so sparsam?
 
@@ -44,16 +51,16 @@ CUDA/cuDNN bringt das Image selbst mit (als pip-Pakete) – auf dem Host muss ni
 
 ## Installation
 
-GitHub Actions baut bei jedem Push auf `main` das Image `ghcr.io/rhineworks-code/argusnvr:latest`.
+GitHub Actions baut bei jedem Push auf `main` das Image `ghcr.io/rhineworks-code/camspire-nvr:latest`.
 Da das Repo privat ist, braucht der Server einmalig einen Login (GitHub-Token mit `read:packages`):
 
 ```bash
 echo <TOKEN> | docker login ghcr.io -u rhineworks-code --password-stdin
 
-git clone https://github.com/rhineworks-code/argusnvr.git ~/argusnvr
-cd ~/argusnvr
+git clone https://github.com/rhineworks-code/CamSpireNVR.git ~/camspire-nvr
+cd ~/camspire-nvr
 docker compose pull && docker compose up -d
-docker compose logs -f argus
+docker compose logs -f camspire
 ```
 
 Danach **http://SERVER:5080** öffnen – beim ersten Start landest du direkt in den **Einstellungen**
@@ -78,7 +85,7 @@ Tastatur: Leertaste = Play/Pause, ←/→ = 5 s (mit Shift 60 s).
 
 **Einstellungen → Aufnahme & Speicher → Speicherort**: Lokal, Netzwerkfestplatte (SMB, z. B. Synology),
 NFS oder ein Ordner, der auf dem Host eingebunden ist. „Verbindung testen“ prüft Anmeldung und Schreibrechte.
-Datenbank, Snapshots und Gesichter bleiben immer lokal. Fällt das NAS aus, schreibt Argus lokal weiter und
+Datenbank, Snapshots und Gesichter bleiben immer lokal. Fällt das NAS aus, schreibt CamSpire lokal weiter und
 verbindet sich automatisch neu.
 
 * Der Container braucht dafür `cap_add: SYS_ADMIN` (steht in `docker-compose.yml`).
@@ -144,7 +151,7 @@ Danach `docker compose build && docker compose up -d`.
 
 1. Unbekannte Gesichter landen unter **Gesichter → Unbekannt**, ähnliche werden automatisch gruppiert.
 2. Gruppe einmal benennen (oder einer bestehenden Person zuordnen) → alle Bilder werden zur Referenz.
-3. Ab dann erkennt Argus die Person. Bei sicheren Treffern mit **neuem** Blickwinkel/Licht lernt es selbst weitere
+3. Ab dann erkennt CamSpire die Person. Bei sicheren Treffern mit **neuem** Blickwinkel/Licht lernt es selbst weitere
    Referenzen dazu (im UI mit „Auto“ markiert, max. 40 pro Person – die redundantesten fliegen zuerst raus).
 4. Falsch erkannt? Im Ereignis den richtigen Namen eintragen oder „Niemand davon“ → falsch gelernte Bilder
    werden sofort entfernt.
@@ -159,22 +166,22 @@ Stellschrauben in `faces:` – `recognition_threshold` höher = weniger Verwechs
 
 ### MQTT (automatisch)
 
-`mqtt.enabled: true` setzen – Argus legt per Discovery pro Kamera ein Gerät **„Argus &lt;Kamera&gt;“** an:
+`mqtt.enabled: true` setzen – CamSpire legt per Discovery pro Kamera ein Gerät **„CamSpire &lt;Kamera&gt;“** an:
 
 | Entität | Beispiel |
 |---|---|
-| `binary_sensor` Person/Fahrzeug/Tier erkannt | `binary_sensor.argus_einfahrt_person_erkannt` |
-| `binary_sensor` pro Zone | `binary_sensor.argus_einfahrt_person_in_einfahrt` |
-| `sensor` Anzahl | `sensor.argus_einfahrt_anzahl_person` |
-| `sensor` Erkanntes Gesicht (+ Attribute) | `sensor.argus_einfahrt_erkanntes_gesicht` |
-| `camera` letzter Snapshot pro Gruppe | `camera.argus_einfahrt_letzte_person` |
-| `switch` Erkennung an/aus | `switch.argus_einfahrt_erkennung` |
+| `binary_sensor` Person/Fahrzeug/Tier erkannt | `binary_sensor.camspire_einfahrt_person_erkannt` |
+| `binary_sensor` pro Zone | `binary_sensor.camspire_einfahrt_person_in_einfahrt` |
+| `sensor` Anzahl | `sensor.camspire_einfahrt_anzahl_person` |
+| `sensor` Erkanntes Gesicht (+ Attribute) | `sensor.camspire_einfahrt_erkanntes_gesicht` |
+| `camera` letzter Snapshot pro Gruppe | `camera.camspire_einfahrt_letzte_person` |
+| `switch` Erkennung an/aus | `switch.camspire_einfahrt_erkennung` |
 
-Jedes Ereignis kommt außerdem als JSON auf `argus/events` (`type`: `new` / `update` / `end`).
+Jedes Ereignis kommt außerdem als JSON auf `camspire/events` (`type`: `new` / `update` / `end`).
 
 ### Live-Bild in HA
 
-Argus stellt jeden Stream per RTSP bereit – die Kamera wird dadurch nicht zusätzlich belastet:
+CamSpire stellt jeden Stream per RTSP bereit – die Kamera wird dadurch nicht zusätzlich belastet:
 
 * **Generische Kamera**: Stream `rtsp://SERVER:8554/einfahrt`, Standbild
   `http://SERVER:5080/api/cameras/einfahrt/latest.jpg?boxes=0`
@@ -186,7 +193,7 @@ Argus stellt jeden Stream per RTSP bereit – die Kamera wird dadurch nicht zus�
 alias: Unbekannte Person nachts an der Einfahrt
 trigger:
   - platform: mqtt
-    topic: argus/events
+    topic: camspire/events
 condition:
   - "{{ trigger.payload_json.type == 'end' }}"
   - "{{ trigger.payload_json.label == 'person' }}"
@@ -201,7 +208,7 @@ action:
       title: "Unbekannte Person an der Einfahrt"
       message: "{{ now().strftime('%H:%M') }} Uhr"
       data:
-        image: "/api/camera_proxy/camera.argus_einfahrt_letzte_person"
+        image: "/api/camera_proxy/camera.camspire_einfahrt_letzte_person"
 ```
 
 ## Aufbau
@@ -221,7 +228,7 @@ Kamera ──RTSP──► go2rtc ──┬──► ffmpeg (NVDEC) ► Bewegung
 | `media/snapshots/…` | bestes Bild + Vorschau pro Ereignis |
 | `media/faces/` | Gesichts-Referenzen (112×112) |
 | `media/recordings/` | nur bei `record.mode: continuous` |
-| `media/argus.db` | SQLite (Ereignisse, Personen, Embeddings) |
+| `media/camspire.db` | SQLite (Ereignisse, Personen, Embeddings) |
 
 ## API (Auszug)
 
@@ -245,4 +252,4 @@ Vollständig unter `/api/docs`.
 | Zu viele Fehlalarme | `objects.filters` (min_score, min_area), Masken für Bäume/Straße, `motion.threshold` erhöhen |
 | Gesichter werden nicht erkannt | Erkennungsauflösung erhöhen, `faces.min_face_size` senken, mehr Referenzbilder |
 | Hinter Nginx Proxy Manager | „Websockets Support“ aktivieren |
-| `port is already allocated` (z. B. Frigate läuft parallel) | `.env` neben `docker-compose.yml` anlegen: `ARGUS_RTSP_PORT=8564` und `ARGUS_WEBRTC_PORT=8565`; in den Einstellungen als WebRTC-Adresse dann `SERVER-IP:8565` eintragen |
+| `port is already allocated` (z. B. Frigate läuft parallel) | `.env` neben `docker-compose.yml` anlegen: `CAMSPIRE_RTSP_PORT=8564` und `CAMSPIRE_WEBRTC_PORT=8565`; in den Einstellungen als WebRTC-Adresse dann `SERVER-IP:8565` eintragen |

@@ -1,12 +1,12 @@
 services:
-  argus:
-    image: ghcr.io/rhineworks-code/argusnvr:latest
+  camspire:
+    image: ghcr.io/rhineworks-code/camspire-nvr:latest
     # Selbst bauen statt Image laden: "docker compose build" (z. B. anderes YOLO-Modell)
     build:
       context: .
       args:
         YOLO_MODEL: yolo11s        # yolo11n (sparsam) | yolo11s | yolo11m (genauer)
-    container_name: argus
+    container_name: camspire
     restart: unless-stopped
     shm_size: 256mb
     # Erlaubt das Einbinden einer Netzwerkfestplatte (SMB/NFS) aus den Einstellungen heraus
@@ -22,15 +22,15 @@ services:
       - TZ=Europe/Berlin
     ports:
       # Host-Ports per .env änderbar (z. B. wenn Frigate parallel läuft):
-      #   ARGUS_WEB_PORT=5080  ARGUS_RTSP_PORT=8564  ARGUS_WEBRTC_PORT=8565
-      - "${ARGUS_WEB_PORT:-5080}:5080"                 # Web-Oberfläche + API
-      - "${ARGUS_RTSP_PORT:-8554}:8554"                # RTSP-Restream (z. B. für Home Assistant)
-      - "${ARGUS_WEBRTC_PORT:-8555}:8555/tcp"          # WebRTC (Live-Bild mit minimaler Latenz)
-      - "${ARGUS_WEBRTC_PORT:-8555}:8555/udp"
+      #   CAMSPIRE_WEB_PORT=5080  CAMSPIRE_RTSP_PORT=8564  CAMSPIRE_WEBRTC_PORT=8565
+      - "${CAMSPIRE_WEB_PORT:-${ARGUS_WEB_PORT:-5080}}:5080"                 # Web-Oberfläche + API
+      - "${CAMSPIRE_RTSP_PORT:-${ARGUS_RTSP_PORT:-8554}}:8554"                # RTSP-Restream (z. B. für Home Assistant)
+      - "${CAMSPIRE_WEBRTC_PORT:-${ARGUS_WEBRTC_PORT:-8555}}:8555/tcp"          # WebRTC (Live-Bild mit minimaler Latenz)
+      - "${CAMSPIRE_WEBRTC_PORT:-${ARGUS_WEBRTC_PORT:-8555}}:8555/udp"
       # - "1984:1984"              # go2rtc direkt (optional, nicht nötig)
     volumes:
       - ./config:/config
-      - ./media:/media/argus       # Clips, Snapshots, Gesichter, Datenbank
+      - ./media:/media/camspire       # Clips, Snapshots, Gesichter, Datenbank
     tmpfs:
       # RAM-Puffer für Vorlauf-Segmente: schont SSD/HDD, nichts wird unnötig geschrieben
       - /tmp/cache:size=512m

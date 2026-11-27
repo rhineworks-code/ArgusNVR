@@ -20,7 +20,7 @@ from .recorder import CameraRecorder, RecordingJanitor
 from .runtime import available_providers
 from .storage import Retention
 
-log = logging.getLogger("argus")
+log = logging.getLogger("camspire")
 
 
 def dump_cams(cfg) -> str:
@@ -52,7 +52,7 @@ class Context:
     # ------------------------------------------------------------------ Aufbau
     def build(self) -> None:
         cfg, paths = self.cfg, self.paths
-        log.info("Argus NVR %s – %d Kamera(s) – Provider: %s", __version__, len(cfg.cameras),
+        log.info("CamSpire NVR %s – %d Kamera(s) – Provider: %s", __version__, len(cfg.cameras),
                  ", ".join(available_providers()))
         self.go2rtc.start()
 
@@ -315,7 +315,7 @@ def main() -> None:
     ctx.build()
     ctx.start()
     app = create_app(ctx)
-    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("ARGUS_PORT", 5080)),
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("CAMSPIRE_PORT") or os.environ.get("ARGUS_PORT") or 5080),
                                            log_level="warning", proxy_headers=True, forwarded_allow_ips="*"))
 
     def _sig(*_):

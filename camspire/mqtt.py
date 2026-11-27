@@ -1,11 +1,11 @@
 """MQTT + Home-Assistant-Discovery.
 
-Entitäten pro Kamera (Gerät "Argus <Kamera>"):
+Entitäten pro Kamera (Gerät "CamSpire <Kamera>"):
   binary_sensor  Person / Fahrzeug / Tier erkannt (+ pro Zone)
   sensor         Anzahl Personen / Fahrzeuge / Tiere, zuletzt erkanntes Gesicht
   camera         letzter Snapshot pro Gruppe
   switch         Erkennung an/aus
-Topic argus/events liefert jedes Ereignis als JSON (new/update/end) für Automationen.
+Topic camspire/events liefert jedes Ereignis als JSON (new/update/end) für Automationen.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import numpy as np
 
 from .config import Config
 
-log = logging.getLogger("argus.mqtt")
+log = logging.getLogger("camspire.mqtt")
 
 GROUP_DE = {"person": "Person", "vehicle": "Fahrzeug", "animal": "Tier"}
 ICONS = {"person": "mdi:account", "vehicle": "mdi:car", "animal": "mdi:paw"}
@@ -33,7 +33,7 @@ class Mqtt:
         self.m = cfg.mqtt
         self.p = self.m.topic_prefix
         self.on_detect_switch = on_detect_switch
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"argus-{int(time.time())}")
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"camspire-{int(time.time())}")
         if self.m.username:
             self.client.username_pw_set(self.m.username, self.m.password)
         self.client.will_set(f"{self.p}/available", "offline", retain=True)
@@ -71,7 +71,15 @@ class Mqtt:
         self._pub(f"{self.p}/available", "online", retain=True)
         client.subscribe(f"{self.p}/+/detect/set")
         client.subscribe(f"{self.m.discovery_prefix}/status")
+        self._remove_legacy()
         self._discovery()
+
+    def _remove_legacy(self) -> None:
+        """Entitäten aus der Zeit vor der Umbenennung (argus_*) aus Home Assistant entfernen."""
+        for cid, cam in self.cfg.cameras.items():
+            for topic, _ in self.discovery_items(cid, cam, all_zones=True):
+                self.client.publish(topic.replace("/camspire_", "/argus_"), b"", retain=True)
+        self.client.publish("argus/available", b"", retain=True)
 
     def _on_message(self, client, userdata, msg) -> None:
         payload = msg.payload.decode(errors="ignore").strip()
@@ -99,11 +107,11 @@ class Mqtt:
     def discovery_items(self, cid: str, cam, all_zones: bool = False) -> list[tuple[str, dict]]:
         dp = self.m.discovery_prefix
         avail = [{"topic": f"{self.p}/available"}]
-        dev = {"identifiers": [f"argus_{cid}"], "name": f"Argus {cam.name}", "manufacturer": "Argus NVR",
+        dev = {"identifiers": [f"camspire_{cid}"], "name": f"CamSpire {cam.name}", "manufacturer": "CamSpire NVR",
                "model": "Kamera"}
         items: list[tuple[str, dict]] = []
         for g in ("person", "vehicle", "animal"):
-            uid = f"argus_{cid}_{g}"
+            uid = f"camspire_{cid}_{g}"
             items.append((f"{dp}/binary_sensor/{uid}/config", {
                 "name": f"{GROUP_DE[g]} erkannt", "unique_id": uid, "device": dev, "availability": avail,
                 "state_topic": f"{self.p}/{cid}/{g}", "device_class": "occupancy",
@@ -115,18 +123,18 @@ class Mqtt:
                 "name": f"Letzte {GROUP_DE[g]}", "unique_id": f"{uid}_snapshot", "device": dev,
                 "availability": avail, "topic": f"{self.p}/{cid}/{g}/snapshot"}))
             for z in cam.zones:
-                zuid = f"argus_{cid}_{z}_{g}"
+                zuid = f"camspire_{cid}_{z}_{g}"
                 items.append((f"{dp}/binary_sensor/{zuid}/config", {
                     "name": f"{GROUP_DE[g]} in {z}", "unique_id": zuid, "device": dev, "availability": avail,
                     "state_topic": f"{self.p}/{cid}/zone/{z}/{g}", "device_class": "occupancy",
                     "value_template": "{{ 'ON' if value|int(0) > 0 else 'OFF' }}", "icon": ICONS[g]}))
         if all_zones or (cam.faces and self.cfg.faces.enabled):
-            items.append((f"{dp}/sensor/argus_{cid}_face/config", {
-                "name": "Erkanntes Gesicht", "unique_id": f"argus_{cid}_face", "device": dev,
+            items.append((f"{dp}/sensor/camspire_{cid}_face/config", {
+                "name": "Erkanntes Gesicht", "unique_id": f"camspire_{cid}_face", "device": dev,
                 "availability": avail, "state_topic": f"{self.p}/{cid}/face",
                 "json_attributes_topic": f"{self.p}/{cid}/face/attributes", "icon": "mdi:face-recognition"}))
-        items.append((f"{dp}/switch/argus_{cid}_detect/config", {
-            "name": "Erkennung", "unique_id": f"argus_{cid}_detect", "device": dev, "availability": avail,
+        items.append((f"{dp}/switch/camspire_{cid}_detect/config", {
+            "name": "Erkennung", "unique_id": f"camspire_{cid}_detect", "device": dev, "availability": avail,
             "command_topic": f"{self.p}/{cid}/detect/set", "state_topic": f"{self.p}/{cid}/detect/state",
             "icon": "mdi:motion-sensor"}))
         return items
@@ -182,7 +190,7 @@ def test_connection(host: str, port: int, username: str = "", password: str = ""
     import paho.mqtt.client as mqtt
     result: dict[str, Any] = {}
     done = threading.Event()
-    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"argus-test-{int(time.time())}")
+    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"camspire-test-{int(time.time())}")
     if username:
         c.username_pw_set(username, password)
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------------------
-# Argus NVR – ein Container: go2rtc + ffmpeg (NVDEC) + YOLO/Gesichter auf CUDA
+# CamSpire NVR – ein Container: go2rtc + ffmpeg (NVDEC) + YOLO/Gesichter auf CUDA
 # ---------------------------------------------------------------------------
 
 # ---------- Stage 1: Modelle bauen (wird verworfen, landet nicht im Image) ----
@@ -28,10 +28,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
-    ARGUS_CONFIG=/config/config.yml \
-    ARGUS_MEDIA=/media/argus \
-    ARGUS_CACHE=/tmp/cache \
-    ARGUS_MODELS=/models
+    CAMSPIRE_CONFIG=/config/config.yml \
+    CAMSPIRE_MEDIA=/media/camspire \
+    CAMSPIRE_CACHE=/tmp/cache \
+    CAMSPIRE_MODELS=/models
 
 # ffmpeg mit NVDEC/CUDA (BtbN-Build) + go2rtc
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -48,9 +48,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --from=models /models /models
-COPY argus ./argus
+COPY camspire ./camspire
 
 EXPOSE 5080 1984 8554 8555/tcp 8555/udp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
   CMD curl -fs http://127.0.0.1:5080/api/health || exit 1
-CMD ["python", "-m", "argus.main"]
+CMD ["python", "-m", "camspire.main"]
