@@ -1,5 +1,5 @@
 // CamSpire NVR – Service Worker: App-Installation, Offline-Grundgerüst, Push-Benachrichtigungen
-const VERSION = 'camspire-v1.4.0';
+const VERSION = 'camspire-v1.4.2';
 const SHELL = ['/', '/static/style.css', '/static/app.js', '/static/settings.js', '/static/history.js', '/static/account.js',
   '/static/icon.svg', '/static/icons/icon-192.png', '/static/icons/badge-96.png'];
 

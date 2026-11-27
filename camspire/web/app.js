@@ -67,10 +67,17 @@ const faceToasted = new Set();
 const emit = (msg) => listeners.forEach((fn) => fn(msg));
 
 // ---------------------------------------------------------------- WebSocket
-function connectWS() {
+let WS = null, wsTimer = 0;
+const wsAlive = () => WS && (WS.readyState === WebSocket.OPEN || WS.readyState === WebSocket.CONNECTING);
+function connectWS(now = false) {
+  if (now) { clearTimeout(wsTimer); if (WS && WS.readyState === WebSocket.OPEN) return; }
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`);
   ws.onopen = () => { $('#conn').classList.add('on'); $('#conn span').textContent = 'verbunden'; };
-  ws.onclose = () => { $('#conn').classList.remove('on'); $('#conn span').textContent = 'getrennt'; setTimeout(connectWS, 2500); };
+  WS = ws;
+  ws.onclose = () => {
+    $('#conn').classList.remove('on'); $('#conn span').textContent = 'getrennt';
+    if (WS === ws) { clearTimeout(wsTimer); wsTimer = setTimeout(() => { if (!document.hidden) connectWS(); }, 2500); }
+  };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === 'counts') state.counts[m.camera] = m.counts;
@@ -134,6 +141,22 @@ function streamCandidates(cam, big) {
   return [...new Set(list.filter(Boolean))];
 }
 
+const LIVE_TILES = new Set();
+let hiddenAt = 0;
+function resumeAll() {
+  LIVE_TILES.forEach((t) => t.resume());
+  // Nach längerer Pause ist die alte Verbindung auf dem Handy oft „tot“, obwohl sie offen wirkt
+  if (WS && Date.now() - hiddenAt > 15000) { const old = WS; WS = null; old.onclose = null; try { old.close(); } catch {} }
+  if (!wsAlive()) connectWS(true);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); LIVE_TILES.forEach((t) => t.suspend()); }
+  else resumeAll();
+});
+// iOS: Rückkehr aus dem App-Umschalter / bfcache
+window.addEventListener('pageshow', (e) => { if (e.persisted) resumeAll(); });
+window.addEventListener('online', resumeAll);
+
 export function camTile(cam, { big = false } = {}) {
   const el = document.createElement('div');
   el.className = 'cam'; el.dataset.cam = cam.id;
@@ -151,7 +174,7 @@ export function camTile(cam, { big = false } = {}) {
   let mode = 'live', timer = null, player = null, watchdog = null, posterTimer = null;
   const still = (w) => `/api/cameras/${cam.id}/frame.jpg?w=${w}&t=${Date.now()}`;
   const showLive = async (attempt = 0) => {
-    clearInterval(timer); clearTimeout(watchdog); clearInterval(posterTimer); wrap.innerHTML = ''; el.classList.remove('ready');
+    clearInterval(timer); clearTimeout(watchdog); clearInterval(posterTimer); wrap.innerHTML = ''; el.classList.remove('ready', 'fallback');
     // Sofort ein aktuelles Bild aus der Erkennung zeigen und laufend erneuern, bis das Video da ist
     const poster = document.createElement('img');
     poster.className = 'view poster'; poster.alt = '';
@@ -177,6 +200,7 @@ export function camTile(cam, { big = false } = {}) {
         clearInterval(timer); clearInterval(posterTimer); el.classList.add('ready'); el.classList.remove('fallback');
         return;
       }
+      if (document.hidden) return;
       if (Date.now() - started > 6000) {
         // Läuft nach 6 s nichts: nächste Variante probieren, zuletzt laufendes Standbild
         clearInterval(timer);
@@ -208,7 +232,11 @@ export function camTile(cam, { big = false } = {}) {
     el.classList.toggle('alert', (c.person || 0) > 0);
   };
   el.updateStatus = (st) => { const d = $('.dot', el); d.className = `dot ${st?.status || ''}`; };
-  el.destroy = () => { clearInterval(timer); clearInterval(posterTimer); clearTimeout(watchdog); wrap.innerHTML = ''; };
+  el.destroy = () => { clearInterval(timer); clearInterval(posterTimer); clearTimeout(watchdog); wrap.innerHTML = ''; LIVE_TILES.delete(el); };
+  // App/Tab im Hintergrund: Stream beenden (spart Akku & Daten). Zurück im Vordergrund: sofort neu verbinden.
+  el.suspend = () => { if (mode !== 'live') return; clearInterval(timer); clearTimeout(watchdog); player?.remove(); player = null; el.classList.remove('ready'); };
+  el.resume = () => { if (!el.isConnected) { LIVE_TILES.delete(el); return; } if (mode === 'live') showLive(0); else showAI(); };
+  LIVE_TILES.add(el);
   el.updateCounts(state.counts[cam.id] || cam.counts);
   showLive();
   return el;
