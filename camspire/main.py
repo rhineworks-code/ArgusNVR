@@ -35,6 +35,10 @@ class Context:
         self.paths.ensure()
         self.cfg = load_config(self.paths.config)
         self.db = Database(self.paths.db)
+        from .auth import Auth
+        self.auth = Auth(self.db)
+        self._migrate_basic_auth()
+        self.push = None
         self.hub = Hub()
         self.go2rtc = Go2rtc(self.cfg)
         from .nas import Storage
@@ -62,6 +66,12 @@ class Context:
         self._start_mqtt(cfg)
 
         self.events = EventManager(cfg, paths, self.db, self.hub, self.mqtt, self.faces, self.recorders)
+        try:
+            from .push import Push
+            self.push = Push(self.db, self.paths.config.parent, self.auth, self)
+            self.events.push = self.push
+        except Exception:
+            log.exception("Push-Benachrichtigungen nicht verfügbar")
         # offene Ereignisse vom letzten Lauf abschließen
         self.db.execute("UPDATE events SET end_ts=start_ts+1 WHERE end_ts IS NULL")
 
@@ -97,6 +107,17 @@ class Context:
             self.mqtt.stop()
         self.go2rtc.stop()
 
+
+    def _migrate_basic_auth(self) -> None:
+        """Alter Login (Benutzer/Passwort in der config.yml) wird zum ersten Admin."""
+        a = self.cfg.auth
+        if a.username and a.password and not self.auth.has_users():
+            try:
+                self.auth.create_user(a.username, a.password if len(a.password) >= 8 else a.password + "!" * (8 - len(a.password)),
+                                      role="admin")
+                log.warning("Bisheriger Login „%s“ wurde als Admin übernommen", a.username)
+            except ValueError as e:
+                log.error("Login-Übernahme fehlgeschlagen: %s", e)
 
     # ------------------------------------------------------------------ Bausteine
     def _load_detector(self, cfg):

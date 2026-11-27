@@ -72,6 +72,28 @@ Selbst bauen statt laden (z. B. anderes YOLO-Modell): `docker compose build && d
 
 Oberfläche: **http://SERVER:5080** · API-Doku: **http://SERVER:5080/api/docs**
 
+## Anmeldung, Benutzer & Rechte
+
+Beim ersten Aufruf legst du das **Admin-Konto** an. Danach ist alles nur noch mit Anmeldung erreichbar.
+
+* **Benutzer** (Einstellungen → Benutzer): Rolle Admin oder Benutzer. Benutzer bekommen einzelne Rechte
+  (Live, Verlauf, Ereignisse, Download, Ereignisse löschen, Gesichter verwalten, Erkennung schalten, System, Einstellungen)
+  und optional nur **bestimmte Kameras**. Vorlagen: „Nur ansehen“, „Familie“, „Alles außer Einstellungen“.
+* **Fingerabdruck / Face ID / Windows Hello** (Mein Konto → Passkey hinzufügen). Funktioniert nur über **HTTPS**
+  (z. B. über Nginx Proxy Manager / Cloudflare) und gilt für genau diese Adresse.
+* **Angemeldete Geräte** einsehen und abmelden, **API-Tokens** für Home Assistant & Co.
+  (`/api/cameras/<id>/frame.jpg?token=csp_…` oder Header `Authorization: Bearer csp_…`).
+* Schutz gegen Durchprobieren: nach 5 Fehlversuchen wird die Anmeldung zunehmend verzögert.
+* Ein früher in der `config.yml` eingetragener Login wird beim Update automatisch zum ersten Admin.
+
+## App & Push-Benachrichtigungen
+
+CamSpire lässt sich als **App installieren** (Android/Chrome/Edge: „App installieren“, iPhone: Safari → Teilen →
+„Zum Home-Bildschirm“). Unter **Mein Konto → Benachrichtigungen** pro Gerät aktivieren: Nachricht mit Bild bei
+Personen/Fahrzeugen/Tieren, Filter nach Kamera, „nur unbekannte“ oder „nur bekannte“ Gesichter, Pause zwischen
+Meldungen und Ruhezeit. Erkennt CamSpire ein Gesicht, steht der Name in der Nachricht („Max – Haustür“).
+Voraussetzung: **HTTPS**; auf dem iPhone muss CamSpire als App installiert sein (iOS 16.4+).
+
 ## Verlauf (Wiedergabe mit Zeitachse)
 
 Unter **Verlauf** läuft rechts eine Zeitachse (oben = jetzt, nach unten älter):

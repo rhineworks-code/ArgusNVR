@@ -12,3 +12,5 @@ websockets>=13
 paho-mqtt>=2.0
 pyyaml>=6
 pydantic>=2.7
+webauthn>=2.2
+pywebpush>=2.0
