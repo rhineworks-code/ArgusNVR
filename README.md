@@ -164,7 +164,12 @@ Danach `docker compose build && docker compose up -d`.
 * **Substream für die Erkennung**, Hauptstream für Aufnahme und Vollbild – so ist die Last minimal.
 * **Für Gesichter** sollte der Erkennungsstream mind. 720p haben (oder `detect.stream: main` setzen,
   das wird automatisch auf max. 1920 px verkleinert). Gesichter brauchen ~40 px Breite.
-* **I-Frame-Intervall** an der Kamera auf 1–2 s stellen (= fps × 2). Dann beginnt der Vorlauf exakt.
+* **I-Frame-Intervall** an der Kamera auf 1 s stellen (= Bildrate, z. B. 25 bei 25 fps) und „H.264+/H.265+/Smart Codec“
+  ausschalten. Dann startet das Vollbild-Live sofort und der Vorlauf beginnt exakt. Unter **System** steht pro Kamera
+  der gemessene Keyframe-Abstand (rot = zu groß).
+* Das **Live-Raster** nutzt einen vorgewärmten H.264-Schnellstart-Stream (vom Substream, auf der GPU umgewandelt,
+  Keyframe alle 12 Bilder) – das Bild steht dadurch in unter einer Sekunde, egal wie die Kamera eingestellt ist.
+  Pro Kamera abschaltbar unter „Live-Bild“.
 * **Zonen und Masken** sind normierte Koordinaten (0–1). Die KI-Ansicht im Live-Bild (Knopf „KI“) zeigt
   Zonen, Masken, Bewegungsbereiche und Erkennungsrahmen – ideal zum Feinjustieren.
 * `require_zone: true` → Ereignisse nur, wenn das Objekt in einer Zone war (z. B. Gehweg ignorieren).

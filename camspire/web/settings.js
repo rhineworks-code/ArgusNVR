@@ -234,7 +234,7 @@ export function openCameraEditor(id, preset = null) {
         ${row('Daueraufnahme behalten', `${num('continuous_days', 1, 3650, 1, 'cam')} <span class="muted">Tage – leer = global (${S.cfg.record.retention.continuous_days})</span>`)}
       </section>
       <section><h3>Live-Bild</h3>
-        ${row('H.265 für den Browser umwandeln', seg('live_transcode', [['auto', 'Automatisch'], ['on', 'Immer'], ['off', 'Nie']], 'cam'), 'Viele Browser zeigen H.265 nicht an – CamSpire wandelt dann auf der GPU in H.264 um (nur solange jemand zuschaut)')}
+        ${row('Schnellstart & H.264-Umwandlung', seg('live_transcode', [['auto', 'Automatisch'], ['on', 'Immer umwandeln'], ['off', 'Aus (Originalstream)']], 'cam'), 'Automatisch: Live-Raster über vorgewärmten H.264-Stream (Bild in unter 1 s), H.265 wird für Browser umgewandelt – auf der Grafikkarte')}
       </section>
       <div class="m-foot"><span class="spacer"></span><button class="btn" data-close>Abbrechen</button><button class="btn primary" id="c-save">Speichern</button></div>
     </div>`, true);

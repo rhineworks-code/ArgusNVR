@@ -165,7 +165,8 @@ class Context:
             threading.Thread(target=self._probe_codecs, args=(cid, cam), daemon=True).start()
 
     def _probe_codecs(self, cid, cam) -> None:
-        """Codec von Haupt- und Substream ermitteln (fürs Live-Bild: H.265 braucht ggf. Umwandlung)."""
+        """Codec und Keyframe-Abstand von Haupt- und Substream ermitteln (fürs Live-Bild und als Hinweis)."""
+        import json as _json
         import subprocess
         time.sleep(3)
         out = {}
@@ -175,13 +176,16 @@ class Context:
             for _ in range(3):
                 try:
                     r = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-timeout", "8000000",
-                                        "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height",
-                                        "-of", "csv=p=0", f"rtsp://127.0.0.1:8554/{stream}"],
-                                       capture_output=True, text=True, timeout=20)
-                    parts = r.stdout.strip().split(",")
-                    if r.returncode == 0 and parts[0]:
-                        out[key] = {"codec": parts[0], "width": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
-                                    "height": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None}
+                                        "-select_streams", "v:0", "-read_intervals", "%+12",
+                                        "-show_entries", "stream=codec_name,width,height,avg_frame_rate:packet=pts_time,flags",
+                                        "-of", "json", f"rtsp://127.0.0.1:8554/{stream}"],
+                                       capture_output=True, text=True, timeout=30)
+                    d = _json.loads(r.stdout or "{}")
+                    st = (d.get("streams") or [{}])[0]
+                    if st.get("codec_name"):
+                        keys = [float(p["pts_time"]) for p in d.get("packets", []) if "K" in p.get("flags", "") and p.get("pts_time")]
+                        gop = round((keys[-1] - keys[0]) / (len(keys) - 1), 1) if len(keys) >= 2 else None
+                        out[key] = {"codec": st["codec_name"], "width": st.get("width"), "height": st.get("height"), "gop": gop}
                         break
                 except Exception:
                     pass
@@ -189,6 +193,10 @@ class Context:
         if self.workers.get(cid) is not None:
             self.codecs[cid] = out
             self.hub.publish({"type": "codecs", "camera": cid, "codecs": out})
+            slow = [f"{k} {v['gop']} s" for k, v in out.items() if v.get("gop") and v["gop"] > 2.5]
+            if slow:
+                log.info("[%s] Keyframe-Abstand groß (%s) – an der Kamera I-Frame-Intervall = Bildrate einstellen "
+                         "für schnelleren Bildaufbau", cid, ", ".join(slow))
 
     def _drop_camera(self, cid) -> None:
         w = self.workers.pop(cid, None)

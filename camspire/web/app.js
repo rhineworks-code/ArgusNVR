@@ -120,13 +120,18 @@ const HEVC_OK = (() => {
   try { return !!window.MediaSource && ['hvc1.1.6.L120.90', 'hev1.1.6.L120.90', 'hvc1.1.6.L93.B0'].some((c) => MediaSource.isTypeSupported(`video/mp4; codecs="${c}"`)); }
   catch { return false; }
 })();
-function pickStream(cam, big, forceH264 = false) {
+// Reihenfolge der Versuche: vorgewärmter Schnellstart-Stream (Raster) bzw. Originalstream (Vollbild),
+// danach die umgewandelte H.264-Variante
+function streamCandidates(cam, big) {
   const native = big ? cam.main_stream : cam.live_stream;
   const h264 = big ? cam.main_stream_h264 : cam.live_stream_h264;
-  if (!h264) return native;
-  if (forceH264 || cam.transcode === 'on') return h264;
   const codec = (big ? cam.codecs?.main : (cam.codecs?.sub || cam.codecs?.main))?.codec || '';
-  return /hevc|h265/i.test(codec) && !HEVC_OK ? h264 : native;
+  const hevcBad = /hevc|h265/i.test(codec) && !HEVC_OK;
+  const list = [];
+  if (!big && cam.live_fast) list.push(cam.live_fast);
+  if (cam.transcode === 'on' || hevcBad) { if (h264) list.push(h264); }
+  else { list.push(native); if (h264) list.push(h264); }
+  return [...new Set(list.filter(Boolean))];
 }
 
 export function camTile(cam, { big = false } = {}) {
@@ -143,18 +148,20 @@ export function camTile(cam, { big = false } = {}) {
       <div class="row counts"></div>
     </div>`;
   const wrap = $('.view-wrap', el);
-  let mode = 'live', timer = null, player = null, watchdog = null, triedH264 = false;
+  let mode = 'live', timer = null, player = null, watchdog = null, posterTimer = null;
   const still = (w) => `/api/cameras/${cam.id}/frame.jpg?w=${w}&t=${Date.now()}`;
-  const showLive = async (forceH264 = false) => {
-    clearInterval(timer); clearTimeout(watchdog); wrap.innerHTML = ''; el.classList.remove('ready');
-    // Sofort ein Standbild aus der Erkennung zeigen, bis das Video läuft
+  const showLive = async (attempt = 0) => {
+    clearInterval(timer); clearTimeout(watchdog); clearInterval(posterTimer); wrap.innerHTML = ''; el.classList.remove('ready');
+    // Sofort ein aktuelles Bild aus der Erkennung zeigen und laufend erneuern, bis das Video da ist
     const poster = document.createElement('img');
-    poster.className = 'view poster'; poster.alt = ''; poster.src = still(big ? 1280 : 640);
-    poster.onerror = () => (poster.style.visibility = 'hidden');
+    poster.className = 'view poster'; poster.alt = '';
     wrap.append(poster);
+    const refresh = () => { const n = new Image(); n.onload = () => { poster.src = n.src; poster.style.visibility = ''; }; n.src = still(big ? 1280 : 640); };
+    refresh(); posterTimer = setInterval(() => { if (!el.classList.contains('ready')) refresh(); }, 1000);
     const P = await loadPlayer();
     if (!P) { showStill(); return; }
-    const stream = pickStream(cam, big, forceH264);
+    const candidates = streamCandidates(cam, big);
+    const stream = candidates[Math.min(attempt, candidates.length - 1)];
     player = document.createElement('camspire-video');
     player.className = 'player';
     player.background = false;
@@ -163,25 +170,23 @@ export function camTile(cam, { big = false } = {}) {
     player.src = wsUrl(stream);
     // Video läuft? (Element entsteht erst, wenn der Player im DOM hängt -> regelmäßig prüfen)
     const started = Date.now();
-    clearInterval(timer);
     timer = setInterval(() => {
       const v = player.video || player.querySelector('video');
       if (v && !v.dataset.styled) { v.style.cssText = 'width:100%;height:100%;object-fit:contain;background:transparent'; v.dataset.styled = 1; }
       if (v && v.readyState >= 2 && v.videoWidth > 0) {
-        clearInterval(timer); el.classList.add('ready'); el.classList.remove('fallback');
+        clearInterval(timer); clearInterval(posterTimer); el.classList.add('ready'); el.classList.remove('fallback');
         return;
       }
-      if (Date.now() - started > 9000) {
-        // Läuft nach 9 s nichts: H.264-Variante probieren (Browser kann H.265 oft nicht), danach Standbild
+      if (Date.now() - started > 6000) {
+        // Läuft nach 6 s nichts: nächste Variante probieren, zuletzt laufendes Standbild
         clearInterval(timer);
-        const alt = big ? cam.main_stream_h264 : cam.live_stream_h264;
-        if (alt && !triedH264 && stream !== alt) { triedH264 = true; showLive(true); }
+        if (attempt + 1 < candidates.length) showLive(attempt + 1);
         else showStill(true);
       }
-    }, 300);
+    }, 250);
   };
   const showStill = (isFallback = false) => {
-    clearTimeout(watchdog);
+    clearTimeout(watchdog); clearInterval(posterTimer);
     wrap.innerHTML = `<img class="view" alt="">`;
     const img = $('img', wrap);
     const tick = () => { const n = new Image(); n.onload = () => (img.src = n.src); n.src = still(big ? 1280 : 640); };
@@ -189,7 +194,7 @@ export function camTile(cam, { big = false } = {}) {
     el.classList.toggle('fallback', isFallback);
   };
   const showAI = () => {
-    clearTimeout(watchdog);
+    clearTimeout(watchdog); clearInterval(posterTimer);
     wrap.innerHTML = `<img class="view" alt="">`;
     const img = $('img', wrap);
     const tick = () => { const n = new Image(); n.onload = () => (img.src = n.src); n.src = `/api/cameras/${cam.id}/latest.jpg?w=${big ? 1600 : 960}&t=${Date.now()}`; };
@@ -203,7 +208,7 @@ export function camTile(cam, { big = false } = {}) {
     el.classList.toggle('alert', (c.person || 0) > 0);
   };
   el.updateStatus = (st) => { const d = $('.dot', el); d.className = `dot ${st?.status || ''}`; };
-  el.destroy = () => { clearInterval(timer); clearTimeout(watchdog); wrap.innerHTML = ''; };
+  el.destroy = () => { clearInterval(timer); clearInterval(posterTimer); clearTimeout(watchdog); wrap.innerHTML = ''; };
   el.updateCounts(state.counts[cam.id] || cam.counts);
   showLive();
   return el;
@@ -521,10 +526,10 @@ pages.system = async () => {
           <dt>Frei lokal</dt><dd>${fmtBytes(st.disk_free)}</dd>
           ${st.oldest ? `<dt>Älteste Aufnahme</dt><dd>${new Date(st.oldest * 1000).toLocaleDateString('de-DE')}</dd>` : ''}</dl></div>
       <div class="card" style="grid-column:1/-1"><h3>Kameras</h3><div style="overflow-x:auto"><table>
-        <tr><th>Kamera</th><th>Status</th><th>Auflösung</th><th>Codec</th><th>Dekodierung</th><th>Bilder/s</th><th>KI/s</th><th>Bewegung</th><th>Aufnahme</th></tr>
+        <tr><th>Kamera</th><th>Status</th><th>Auflösung</th><th>Codec · Keyframe</th><th>Dekodierung</th><th>Bilder/s</th><th>KI/s</th><th>Bewegung</th><th>Aufnahme</th></tr>
         ${Object.entries(s.cameras).map(([id, c]) => { const r = s.recording[id]; const cam = state.cams.find((x) => x.id === id);
           return `<tr><td>${esc(cam?.name || id)}</td><td><span class="pill ${c.status === 'online' ? 'ok' : 'bad'}">${c.status}</span></td>
-          <td>${c.resolution.join('×')}</td><td>${esc([s.codecs?.[id]?.main?.codec, s.codecs?.[id]?.sub?.codec].filter(Boolean).join(' / ').toUpperCase() || '–')}</td><td>${c.hwaccel ? 'GPU (NVDEC)' : 'CPU'}</td><td>${c.decode_fps}</td><td>${c.enabled ? c.detect_fps : 'aus'}</td>
+          <td>${c.resolution.join('×')}</td><td>${['main', 'sub'].map((k) => s.codecs?.[id]?.[k]).filter(Boolean).map((x) => `${esc(String(x.codec).toUpperCase())}${x.gop ? ` <span class="${x.gop > 2.5 ? 'bad' : 'muted'}" title="Keyframe-Abstand – über 2,5 s verzögert den Bildaufbau">· ${x.gop}s</span>` : ''}`).join(' / ') || '–'}</td><td>${c.hwaccel ? 'GPU (NVDEC)' : 'CPU'}</td><td>${c.decode_fps}</td><td>${c.enabled ? c.detect_fps : 'aus'}</td>
           <td>${c.motion ? '●' : '–'}</td><td>${r ? (r.recording ? `<span class="pill bad">● ${r.mode === 'continuous' ? 'Dauer' : 'REC'}</span>` : (Date.now() / 1000 - r.last_segment < 15 ? 'bereit' : '<span class="pill bad">kein Stream</span>')) : 'aus'}</td></tr>`; }).join('')}
       </table></div></div>
       <div class="card"><h3>Aktivität (7 Tage, nach Uhrzeit)</h3><div class="hours">${hours.map((n, h) => `<i title="${h}:00 – ${n}" style="height:${(n / hmax) * 100}%"></i>`).join('')}</div>

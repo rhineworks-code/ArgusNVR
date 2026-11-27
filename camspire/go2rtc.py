@@ -16,8 +16,18 @@ from .config import Config
 log = logging.getLogger("camspire.go2rtc")
 
 
+# Kurze Keyframe-Abstände für umgewandelte Live-Streams: ein neuer Zuschauer bekommt sofort ein Bild,
+# statt auf den nächsten Keyframe der Kamera zu warten (bei vielen Kameras 4–10 s).
+FAST_FFMPEG = {
+    "h264/cuda": "-c:v h264_nvenc -g 12 -bf 0 -profile:v high -level:v auto -preset:v p2 -tune:v ll",
+    "h264": "-c:v libx264 -g 12 -profile:v high -level:v 4.1 -preset:v superfast -tune:v zerolatency -pix_fmt:v yuv420p",
+    "h264/vaapi": "-c:v h264_vaapi -g 12 -bf 0 -profile:v high -level:v 4.1 -sei:v 0",
+}
+
+
 def build_config(cfg: Config) -> dict:
     streams: dict[str, list[str]] = {}
+    preload: dict[str, str] = {}
     for cid, cam in cfg.cameras.items():
         streams[cid] = [cam.main]
         if cam.sub:
@@ -28,13 +38,20 @@ def build_config(cfg: Config) -> dict:
             streams[f"{cid}_h264"] = [f"ffmpeg:{cid}#video=h264#hardware"]
             if cam.sub:
                 streams[f"{cid}_sub_h264"] = [f"ffmpeg:{cid}_sub#video=h264#hardware"]
+            # Schnellstart fürs Live-Raster: dauerhaft vorgewärmt (Substream, H.264, Keyframe alle 12 Bilder)
+            src = f"{cid}_sub" if cam.sub else cid
+            streams[f"{cid}_live"] = [f"ffmpeg:{src}#video=h264#hardware"]
+            preload[f"{cid}_live"] = "video"
     conf = {
         "api": {"listen": ":1984", "base_path": "/go2rtc", "origin": "*"},
         "rtsp": {"listen": ":8554"},
         "webrtc": {"listen": ":8555"},
         "log": {"level": "warn"},
         "streams": streams,
+        "ffmpeg": dict(FAST_FFMPEG),
     }
+    if preload:
+        conf["preload"] = preload
     if cfg.webrtc.candidates:
         conf["webrtc"]["candidates"] = list(cfg.webrtc.candidates) + ["stun:8555"]
     extra = copy.deepcopy(cfg.go2rtc or {})

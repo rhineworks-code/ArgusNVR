@@ -96,7 +96,7 @@ def create_app(ctx) -> FastAPI:
     def stream_cam(src: str | None) -> str | None:
         if not src:
             return None
-        for suf in ("_sub_h264", "_h264", "_sub"):
+        for suf in ("_sub_h264", "_h264", "_sub", "_live"):
             if src.endswith(suf):
                 return src[: -len(suf)]
         return src
@@ -200,6 +200,7 @@ def create_app(ctx) -> FastAPI:
                 # H.264-Varianten (Umwandlung auf der GPU), falls der Browser H.265 nicht kann
                 "live_stream_h264": (f"{cid}_sub_h264" if cam.sub else f"{cid}_h264") if tc != "off" else None,
                 "main_stream_h264": f"{cid}_h264" if tc != "off" else None,
+                "live_fast": f"{cid}_live" if tc != "off" else None,
                 "transcode": tc, "codecs": ctx.codecs.get(cid, {}),
                 "stats": w.stats() if w else None, "counts": ctx.events.counts.get(cid, {})}
 
