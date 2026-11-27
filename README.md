@@ -57,7 +57,7 @@ Da das Repo privat ist, braucht der Server einmalig einen Login (GitHub-Token mi
 ```bash
 echo <TOKEN> | docker login ghcr.io -u rhineworks-code --password-stdin
 
-git clone https://github.com/rhineworks-code/CamSpireNVR.git ~/camspire-nvr
+git clone https://github.com/rhineworks-code/CamSpire-NVR.git ~/camspire-nvr
 cd ~/camspire-nvr
 docker compose pull && docker compose up -d
 docker compose logs -f camspire
